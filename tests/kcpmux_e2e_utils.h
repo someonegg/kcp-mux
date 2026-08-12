@@ -8,10 +8,12 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 #include <map>
 #include <array>
+#include <limits>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -60,6 +62,11 @@ int64_t monotonic_time_ms();
 // ============================================================================
 
 struct E2EEndpoint {
+    struct PendingSend {
+        std::vector<uint8_t> data;
+        size_t offset = 0;
+    };
+
     // Network
     int udp_socket = -1;
     uint16_t port = 0;
@@ -72,7 +79,7 @@ struct E2EEndpoint {
     // Threading
     std::thread worker;
     std::atomic<bool> running{false};
-    std::atomic<int64_t> next_wakeup_ms{0};
+    std::atomic<int64_t> next_wakeup_ms{std::numeric_limits<int64_t>::max()};
 
     // Thread-safe state
     std::mutex mutex;
@@ -80,13 +87,13 @@ struct E2EEndpoint {
     // Accepted connections/streams (for server)
     std::vector<kcpmux_conn_t *> accepted_conns;
     std::vector<kcpmux_stream_t *> accepted_streams;
+    std::map<uint32_t, kcpmux_stream_t *> active_streams;
 
     // Received data per stream (stream_id -> data)
     std::map<uint32_t, std::vector<uint8_t>> received_data;
 
     // Pending send data (for handling write block)
-    std::vector<uint8_t> pending_send_data;
-    size_t pending_send_offset = 0;
+    std::map<uint32_t, PendingSend> pending_sends;
 
     // Connection state tracking
     kcpmux_conn_t *conn = nullptr;
@@ -122,12 +129,19 @@ struct E2EEndpoint {
     void create_stream();
     void send_data(const uint8_t *data, size_t len);
     void send_data_with_retry(const uint8_t *data, size_t len);  // Handles write block
+    void send_data_on_stream_with_retry(uint32_t stream_id,
+                                        const uint8_t *data, size_t len);
     void close_conn();
     void close_stream();
     void queue_action(std::function<void()> action);
+    void queue_stream_read(uint32_t stream_id);
+    void queue_stream_write(uint32_t stream_id);
 
     // Query pending send state
     bool has_pending_send();
+    bool has_active_stream(uint32_t stream_id);
+    kcpmux_stream_t *get_primary_stream();
+    void reset_primary_stream();
 
     // Queries (thread-safe)
     void clear_received_data(uint32_t stream_id);
@@ -137,10 +151,16 @@ struct E2EEndpoint {
 
 private:
     void worker_func();
+    void wake_worker();
+    void process_due_timer(int64_t now);
+    void process_readable_streams();
+    void flush_pending_send(uint32_t stream_id);
 
     // Pending actions
     std::mutex action_mutex;
     std::vector<std::function<void()>> pending_actions;
+    std::set<uint32_t> pending_read_stream_ids;
+    bool read_action_queued = false;
     void process_actions();
 };
 
@@ -174,7 +194,7 @@ int e2e_conn_connect_notify(kcpmux_conn_t *conn, const kcpmux_proto_ext_t *proto
                             kcpmux_proto_ext_t *resp_proto_ext, void *user_data);
 void e2e_conn_state_changed(kcpmux_conn_t *conn, uint8_t old_state, uint8_t new_state, void *user_data);
 void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data);
-void e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data);
+int e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data);
 void e2e_stream_state_changed(kcpmux_stream_t *stream, uint8_t old_state, uint8_t new_state, void *user_data);
 void e2e_stream_read_notify(kcpmux_stream_t *stream, void *user_data);
 void e2e_stream_write_notify(kcpmux_stream_t *stream, void *user_data);

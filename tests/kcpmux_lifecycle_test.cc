@@ -4,6 +4,65 @@ using namespace kcpmux_test;
 
 namespace {
 
+struct ImmediateTimerOwner {
+    kcpmux_engine_t *engine = nullptr;
+    kcpmux_timer_node_t node{};
+    int callback_count = 0;
+};
+
+void immediate_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms) {
+    auto *owner = static_cast<ImmediateTimerOwner *>(node->owner);
+    owner->callback_count++;
+    if (owner->callback_count == 1) {
+        EXPECT_EQ(kcpmux_engine_schedule_timer_node(
+            owner->engine, node, now_ms, now_ms), KCPMUX_ERR_OK);
+    } else {
+        kcpmux_engine_cancel_timer_node(owner->engine, node, now_ms);
+    }
+}
+
+struct CloseOrderContext : TestContext {
+    std::vector<char> notifications;
+    uint8_t stream_state = KCPMUX_STREAM_STATE_ERROR;
+    uint8_t conn_state = KCPMUX_CONN_STATE_ERROR;
+};
+
+void record_stream_close(kcpmux_stream_t *stream, int, void *user_data) {
+    auto *ctx = static_cast<CloseOrderContext *>(user_data);
+    ctx->notifications.push_back('S');
+    ctx->stream_state = stream->state;
+}
+
+void record_conn_close(kcpmux_conn_t *conn, int, void *user_data) {
+    auto *ctx = static_cast<CloseOrderContext *>(user_data);
+    ctx->notifications.push_back('C');
+    ctx->conn_state = conn->state;
+}
+
+struct DueFreeOwner {
+    kcpmux_engine_t *engine = nullptr;
+    kcpmux_timer_node_t node{};
+    kcpmux_stream_t *stream = nullptr;
+    int callback_count = 0;
+};
+
+void close_other_due_stream(kcpmux_timer_node_t *node, int64_t now_ms) {
+    auto *owner = static_cast<DueFreeOwner *>(node->owner);
+    owner->callback_count++;
+    EXPECT_EQ(kcpmux_stream_close(owner->stream), 0);
+    owner->stream = nullptr;
+    kcpmux_engine_cancel_timer_node(owner->engine, node, now_ms);
+}
+
+kcpmux_conn_t *create_connected_conn(kcpmux_engine_t *engine,
+                                    const kcpmux_addr_t *addr) {
+    kcpmux_conn_t *conn = kcpmux_conn_new(engine, addr, nullptr, 1);
+    if (!conn) return nullptr;
+    kcpmux_engine_add_conn(engine, conn);
+    kcpmux_conn_set_state(conn, KCPMUX_CONN_STATE_CONNECTED);
+    return conn;
+}
+
 // ============================================================================
 // Engine Tests
 // ============================================================================
@@ -13,7 +72,8 @@ TEST(kcpmux_lifecycle, engine_create_destroy) {
     kcpmux_engine_t *engine = create_test_engine(&ctx);
 
     ASSERT_NE(engine, nullptr);
-    EXPECT_GT(ctx.timer_ms, 0u);
+    EXPECT_EQ(ctx.timer_ms, 0u);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager), nullptr);
 
     kcpmux_engine_destroy(engine);
 }
@@ -21,6 +81,145 @@ TEST(kcpmux_lifecycle, engine_create_destroy) {
 TEST(kcpmux_lifecycle, engine_create_null_callbacks) {
     kcpmux_engine_t *engine = kcpmux_engine_create(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     EXPECT_EQ(engine, nullptr);
+}
+
+TEST(kcpmux_lifecycle, set_timer_zero_requests_async_update) {
+    TestContext ctx;
+    ctx.current_time_ms = 1000;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+
+    ImmediateTimerOwner owner;
+    owner.engine = engine;
+    ASSERT_EQ(kcpmux_engine_register_timer_node(
+        engine, &owner.node, &owner, immediate_timer_callback), KCPMUX_ERR_OK);
+    ASSERT_EQ(kcpmux_engine_schedule_timer_node(
+        engine, &owner.node, 1000, 1000), KCPMUX_ERR_OK);
+    EXPECT_EQ(ctx.timer_ms, 0u);
+    EXPECT_EQ(owner.callback_count, 0);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(owner.callback_count, 1);
+    EXPECT_EQ(owner.node.state, KCPMUX_TIMER_HEAP);
+    EXPECT_EQ(ctx.timer_ms, 0u);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(owner.callback_count, 2);
+    EXPECT_EQ(owner.node.state, KCPMUX_TIMER_IDLE);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager), nullptr);
+
+    kcpmux_engine_unregister_timer_node(engine, &owner.node);
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, owner_registration_reserves_heap_capacity) {
+    TestContext ctx;
+    ctx.current_time_ms = 1000;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    ImmediateTimerOwner owners[8];
+    for (ImmediateTimerOwner &owner : owners) {
+        owner.engine = engine;
+        ASSERT_EQ(kcpmux_engine_register_timer_node(
+                      engine, &owner.node, &owner, immediate_timer_callback),
+                  KCPMUX_ERR_OK);
+    }
+
+    ASSERT_GE(engine->timer_manager.capacity, 8u);
+    size_t reserved_capacity = engine->timer_manager.capacity;
+    for (ImmediateTimerOwner &owner : owners) {
+        ASSERT_EQ(kcpmux_engine_schedule_timer_node(
+                      engine, &owner.node, ctx.current_time_ms + 2000,
+                      ctx.current_time_ms),
+                  KCPMUX_ERR_OK);
+        EXPECT_EQ(engine->timer_manager.capacity, reserved_capacity);
+    }
+
+    for (ImmediateTimerOwner &owner : owners) {
+        kcpmux_engine_unregister_timer_node(engine, &owner.node);
+    }
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, conn_finalization_closes_streams_before_conn_notification) {
+    CloseOrderContext ctx;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    TestAddr addr(0x7f000001, 12008);
+    kcpmux_conn_t *conn = create_connected_conn(engine, addr.get());
+    ASSERT_NE(conn, nullptr);
+    kcpmux_conn_callbacks_t conn_callbacks{};
+    conn_callbacks.conn_close_notify = record_conn_close;
+    kcpmux_conn_set_callbacks(conn, &conn_callbacks, &ctx);
+    kcpmux_stream_callbacks_t stream_callbacks{};
+    stream_callbacks.stream_close_notify = record_stream_close;
+    kcpmux_stream_t *stream = kcpmux_stream_create(
+        conn, nullptr, &stream_callbacks, &ctx);
+    ASSERT_NE(stream, nullptr);
+
+    kcpmux_engine_operation_enter(engine);
+    kcpmux_conn_close_internal(conn, KCPMUX_CLOSE_REASON_NORMAL);
+
+    ASSERT_EQ(ctx.notifications.size(), 2u);
+    EXPECT_EQ(ctx.notifications[0], 'S');
+    EXPECT_EQ(ctx.notifications[1], 'C');
+    EXPECT_EQ(ctx.stream_state, KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(ctx.conn_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(engine->conn_count, 0u);
+    EXPECT_EQ(engine->timer_node_count, 0u);
+    kcpmux_engine_operation_leave(engine);
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, due_callback_can_close_another_due_owner) {
+    TestContext ctx;
+    ctx.current_time_ms = 500;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    TestAddr addr(0x7f000001, 12004);
+    kcpmux_conn_t *conn = create_connected_conn(engine, addr.get());
+    ASSERT_NE(conn, nullptr);
+    kcpmux_stream_t *stream = kcpmux_stream_create(conn, nullptr, nullptr, nullptr);
+    ASSERT_NE(stream, nullptr);
+
+    DueFreeOwner owner;
+    owner.engine = engine;
+    owner.stream = stream;
+    ASSERT_EQ(kcpmux_engine_register_timer_node(
+        engine, &owner.node, &owner, close_other_due_stream), KCPMUX_ERR_OK);
+    kcpmux_engine_cancel_timer_node(engine, &stream->timer_node, 500);
+    ASSERT_EQ(kcpmux_engine_schedule_timer_node(
+        engine, &owner.node, 500, 500), KCPMUX_ERR_OK);
+    ASSERT_EQ(kcpmux_engine_schedule_timer_node(
+        engine, &stream->timer_node, 500, 500), KCPMUX_ERR_OK);
+
+    kcpmux_engine_update(engine);
+
+    EXPECT_EQ(owner.callback_count, 1);
+    EXPECT_EQ(conn->stream_count, 0u);
+    EXPECT_EQ(owner.node.state, KCPMUX_TIMER_IDLE);
+    kcpmux_engine_unregister_timer_node(engine, &owner.node);
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, empty_heap_stale_timer_fire_is_consumed_without_rearm) {
+    TestContext ctx;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    TestAddr addr(0x7f000001, 12006);
+    kcpmux_conn_t *conn = kcpmux_conn_connect(
+        engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
+    ASSERT_NE(conn, nullptr);
+    ASSERT_TRUE(ctx.timer_probe.armed);
+    kcpmux_engine_operation_enter(engine);
+    kcpmux_conn_close_internal(conn, KCPMUX_CLOSE_REASON_NORMAL);
+    kcpmux_engine_operation_leave(engine);
+
+    ASSERT_EQ(kcpmux_timer_peek(&engine->timer_manager), nullptr);
+    size_t set_count = ctx.timer_probe.history.size();
+    ctx.timer_probe.consume();
+    kcpmux_engine_update(engine);
+
+    EXPECT_FALSE(ctx.timer_probe.armed);
+    EXPECT_EQ(ctx.timer_probe.history.size(), set_count);
+    kcpmux_engine_destroy(engine);
 }
 
 TEST(kcpmux_lifecycle, engine_config_default_values) {
@@ -96,11 +295,15 @@ TEST(kcpmux_lifecycle, conn_close_initiator) {
 
     // Deliver CONN_CLOSE to server
     ctx.deliver_client_to_server();
-    EXPECT_EQ(kcpmux_conn_get_state(server_conn), KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(ctx.server_ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.server_engine, ctx.client_addr.get()), nullptr);
 
     // Deliver CONN_CLOSE_ACK to client
     ctx.deliver_server_to_client();
-    EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.client_engine, ctx.server_addr.get()), nullptr);
 
     ctx.teardown();
 }
@@ -156,6 +359,7 @@ TEST(kcpmux_lifecycle, conn_connect_rejected) {
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
         ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
         &client_callbacks, &ctx.client_ctx);
+    ASSERT_NE(client_conn, nullptr);
 
     // Deliver CONN_CONNECT to server (server rejects)
     ctx.deliver_client_to_server();
@@ -164,7 +368,9 @@ TEST(kcpmux_lifecycle, conn_connect_rejected) {
     ctx.deliver_server_to_client();
 
     // Client should be in ERROR state
-    EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_ERROR);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_ERROR);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.client_engine, ctx.server_addr.get()), nullptr);
     EXPECT_EQ(ctx.client_ctx.conn_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.conn_close_reason, KCPMUX_CLOSE_REASON_REJECTED);
 
@@ -260,9 +466,171 @@ TEST(kcpmux_lifecycle, conn_connect_timeout_retry) {
     kcpmux_engine_update(engine);
 
     // Connection should be in ERROR state
-    EXPECT_EQ(kcpmux_conn_get_state(conn), KCPMUX_CONN_STATE_ERROR);
+    EXPECT_EQ(ctx.conn_close_state, KCPMUX_CONN_STATE_ERROR);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(engine, addr.get()), nullptr);
     EXPECT_EQ(ctx.conn_close_count, 1);  // close_notify should be called
     EXPECT_EQ(ctx.conn_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
+
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, conn_control_deadline_does_not_drift) {
+    TestContext ctx;
+    ctx.current_time_ms = 1000;
+
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.ctrl_timeout_ms = 100;
+    config.connect_retries = 1;
+
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    TestAddr addr(0x7f000001, 12345);
+    kcpmux_conn_t *conn = kcpmux_conn_connect(
+        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    ASSERT_NE(conn, nullptr);
+
+    ASSERT_NE(kcpmux_timer_peek(&engine->timer_manager), nullptr);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1100);
+    EXPECT_EQ(ctx.timer_ms, 100u);
+    ctx.sent_packets.clear();
+
+    ctx.current_time_ms = 1050;
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1100);
+    EXPECT_EQ(ctx.timer_ms, 50u);
+    EXPECT_TRUE(ctx.sent_packets.empty());
+
+    ctx.current_time_ms = 1099;
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1100);
+    EXPECT_EQ(ctx.timer_ms, 1u);
+    EXPECT_TRUE(ctx.sent_packets.empty());
+
+    ctx.current_time_ms = 1100;
+    kcpmux_engine_update(engine);
+    ASSERT_EQ(ctx.sent_packets.size(), 1u);
+    EXPECT_EQ(conn->retry_count, 1u);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1200);
+    EXPECT_EQ(ctx.timer_ms, 100u);
+
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, conn_config_replaces_timer_earlier_and_later) {
+    TestContext ctx;
+    ctx.current_time_ms = 1000;
+
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.keepalive_interval_ms = 1000;
+    config.keepalive_timeout_ms = 2000;
+    config.idle_timeout_ms = 0;
+
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    TestAddr addr(0x7f000001, 12345);
+    kcpmux_conn_t *conn = kcpmux_conn_connect(
+        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    ASSERT_NE(conn, nullptr);
+
+    auto ack = build_conn_connect_ack(
+        KCPMUX_ACK_RESULT_OK, conn->generation_id);
+    ASSERT_EQ(kcpmux_engine_input(
+        engine, ack.data(), (unsigned)ack.size(), addr.get()), 0);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 2000);
+
+    ctx.current_time_ms = 1100;
+    config.keepalive_interval_ms = 50;
+    size_t replace_count = ctx.timer_probe.history.size();
+    kcpmux_conn_set_config(conn, &config);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1100);
+    EXPECT_EQ(engine->external_timer_deadline_ms, 1100);
+    EXPECT_EQ(ctx.timer_ms, 0u);
+    ASSERT_EQ(ctx.timer_probe.history.size(), replace_count + 1);
+    EXPECT_EQ(ctx.timer_probe.history.back().callback_time_ms, 1100);
+    EXPECT_EQ(ctx.timer_probe.history.back().delay_ms, 0u);
+    EXPECT_EQ(ctx.timer_probe.history.back().deadline_ms, 1100);
+
+    config.keepalive_interval_ms = 500;
+    kcpmux_conn_set_config(conn, &config);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1500);
+    EXPECT_EQ(engine->external_timer_deadline_ms, 1500);
+    EXPECT_EQ(ctx.timer_ms, 400u);
+    ASSERT_EQ(ctx.timer_probe.history.size(), replace_count + 2);
+    EXPECT_EQ(ctx.timer_probe.history.back().callback_time_ms, 1100);
+    EXPECT_EQ(ctx.timer_probe.history.back().delay_ms, 400u);
+    EXPECT_EQ(ctx.timer_probe.history.back().deadline_ms, 1500);
+
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, conn_connected_deadline_uses_all_anchors) {
+    TestContext ctx;
+    ctx.current_time_ms = 1000;
+
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.keepalive_interval_ms = 1000;
+    config.keepalive_timeout_ms = 300;
+    config.idle_timeout_ms = 200;
+
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    TestAddr addr(0x7f000001, 12345);
+    kcpmux_conn_t *conn = kcpmux_conn_connect(
+        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    ASSERT_NE(conn, nullptr);
+
+    auto ack = build_conn_connect_ack(
+        KCPMUX_ACK_RESULT_OK, conn->generation_id);
+    ASSERT_EQ(kcpmux_engine_input(
+        engine, ack.data(), (unsigned)ack.size(), addr.get()), 0);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1200);
+
+    ctx.current_time_ms = 1100;
+    kcpmux_conn_note_receive(conn, 1100, 1);
+    EXPECT_EQ(conn->last_recv_ts, 1100);
+    EXPECT_EQ(conn->last_payload_ts, 1100);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1300);
+    EXPECT_EQ(engine->external_timer_deadline_ms, 1300);
+    EXPECT_EQ(ctx.timer_ms, 200u);
+
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, zero_keepalive_interval_disables_sending) {
+    TestContext ctx;
+    ctx.current_time_ms = 1000;
+
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.keepalive_interval_ms = 0;
+    config.keepalive_timeout_ms = 500;
+    config.idle_timeout_ms = 0;
+
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    TestAddr addr(0x7f000001, 12345);
+    kcpmux_conn_t *conn = kcpmux_conn_connect(
+        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    ASSERT_NE(conn, nullptr);
+
+    auto ack = build_conn_connect_ack(
+        KCPMUX_ACK_RESULT_OK, conn->generation_id);
+    ASSERT_EQ(kcpmux_engine_input(
+        engine, ack.data(), (unsigned)ack.size(), addr.get()), 0);
+    ctx.sent_packets.clear();
+
+    ASSERT_NE(kcpmux_timer_peek(&engine->timer_manager), nullptr);
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1500);
+    EXPECT_EQ(engine->external_timer_deadline_ms, 1500);
+    EXPECT_EQ(ctx.timer_ms, 500u);
+
+    kcpmux_engine_update(engine);
+    EXPECT_TRUE(ctx.sent_packets.empty());
+    EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1500);
+    EXPECT_EQ(ctx.timer_ms, 500u);
 
     kcpmux_engine_destroy(engine);
 }
@@ -296,7 +664,9 @@ TEST(kcpmux_lifecycle, conn_keepalive_timeout) {
     kcpmux_engine_update(ctx.client_engine);
 
     // Client connection should be in ERROR state due to keepalive timeout
-    EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_ERROR);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_ERROR);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.client_engine, ctx.server_addr.get()), nullptr);
     EXPECT_EQ(ctx.client_ctx.conn_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.conn_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
 
@@ -341,9 +711,9 @@ TEST(kcpmux_lifecycle, conn_idle_timeout) {
     kcpmux_engine_update(ctx.client_engine);
 
     // Client connection should close due to idle timeout
-    uint8_t state = kcpmux_conn_get_state(client_conn);
-    EXPECT_TRUE(state == KCPMUX_CONN_STATE_CLOSING ||
-                state == KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.client_engine, ctx.server_addr.get()), nullptr);
     EXPECT_EQ(ctx.client_ctx.conn_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.conn_close_reason, KCPMUX_CLOSE_REASON_IDLE);
 
@@ -382,18 +752,42 @@ TEST(kcpmux_lifecycle, conn_close_timeout) {
     ctx.advance_time(101);
     kcpmux_engine_update(ctx.client_engine);
 
-    // First retry should be sent
-    EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CLOSING);
-    ctx.client_ctx.sent_packets.clear();
-
-    // Advance time past second timeout (retries exhausted)
-    ctx.advance_time(101);
-    kcpmux_engine_update(ctx.client_engine);
-
-    // Connection should be CLOSED (close timeout doesn't go to ERROR)
-    EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CLOSED);
+    // The only retry is the final send, so the connection closes immediately.
+    ASSERT_EQ(ctx.client_ctx.sent_packets.size(), 1u);
+    EXPECT_EQ(ctx.client_ctx.sent_packets[0][0], KCPMUX_MSG_CONN_CLOSE);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.client_engine, ctx.server_addr.get()), nullptr);
     EXPECT_EQ(ctx.client_ctx.conn_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.conn_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
+
+    ctx.teardown();
+}
+
+TEST(kcpmux_lifecycle, conn_close_zero_retries_sends_once_without_waiting) {
+    DualEngineContext ctx;
+    ctx.setup();
+
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.close_retries = 0;
+    kcpmux_conn_callbacks_t callbacks = create_conn_callbacks(&ctx.client_ctx);
+    kcpmux_conn_t *conn = kcpmux_conn_connect(
+        ctx.client_engine, ctx.server_addr.get(), &config, nullptr,
+        &callbacks, &ctx.client_ctx);
+    ASSERT_NE(conn, nullptr);
+    ctx.deliver_all();
+    ASSERT_EQ(kcpmux_conn_get_state(conn), KCPMUX_CONN_STATE_CONNECTED);
+
+    ctx.client_ctx.sent_packets.clear();
+    ASSERT_EQ(kcpmux_conn_close(conn), 0);
+
+    ASSERT_EQ(ctx.client_ctx.sent_packets.size(), 1u);
+    EXPECT_EQ(ctx.client_ctx.sent_packets[0][0], KCPMUX_MSG_CONN_CLOSE);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
+                  ctx.client_engine, ctx.server_addr.get()), nullptr);
+    EXPECT_EQ(ctx.client_ctx.conn_close_count, 1);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
 
     ctx.teardown();
 }
@@ -431,6 +825,7 @@ TEST(kcpmux_lifecycle, stream_close_timeout) {
     kcpmux_stream_t *stream = kcpmux_stream_create(
         client_conn, &stream_config, &stream_callbacks, &ctx.client_ctx);
     EXPECT_EQ(kcpmux_stream_get_state(stream), KCPMUX_STREAM_STATE_OPEN);
+    uint32_t stream_id = kcpmux_stream_id(stream);
 
     // Send bootstrap payload so close uses protocol close path (not immediate local close).
     uint8_t bootstrap = 0x7f;
@@ -449,16 +844,11 @@ TEST(kcpmux_lifecycle, stream_close_timeout) {
     ctx.advance_time(101);
     kcpmux_engine_update(ctx.client_engine);
 
-    // First retry
-    EXPECT_EQ(kcpmux_stream_get_state(stream), KCPMUX_STREAM_STATE_CLOSING);
-    ctx.client_ctx.sent_packets.clear();
-
-    // Advance time past second timeout (retries exhausted)
-    ctx.advance_time(101);
-    kcpmux_engine_update(ctx.client_engine);
-
-    // Stream should be CLOSED
-    EXPECT_EQ(kcpmux_stream_get_state(stream), KCPMUX_STREAM_STATE_CLOSED);
+    // The only retry is the final send, so the stream closes immediately.
+    ASSERT_EQ(ctx.client_ctx.sent_packets.size(), 1u);
+    EXPECT_EQ(ctx.client_ctx.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE);
+    EXPECT_EQ(ctx.client_ctx.stream_close_state, KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(client_conn, stream_id), nullptr);
     EXPECT_EQ(ctx.client_ctx.stream_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.stream_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
 
@@ -545,11 +935,13 @@ TEST(kcpmux_lifecycle, stream_close_initiator) {
 
     // Deliver STREAM_CLOSE to server
     ctx.deliver_client_to_server();
-    EXPECT_EQ(kcpmux_stream_get_state(server_stream), KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(ctx.server_ctx.stream_close_state, KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(server_conn, stream_id), nullptr);
 
     // Deliver STREAM_CLOSE_ACK to client
     ctx.deliver_server_to_client();
-    EXPECT_EQ(kcpmux_stream_get_state(client_stream), KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(ctx.client_ctx.stream_close_state, KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(client_conn, stream_id), nullptr);
 
     ctx.teardown();
 }
@@ -615,7 +1007,8 @@ TEST(kcpmux_lifecycle, stream_close_initiator_without_payload_immediate_close) {
     ctx.client_ctx.sent_packets.clear();
     kcpmux_stream_close(stream);
 
-    EXPECT_EQ(kcpmux_stream_get_state(stream), KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(ctx.client_ctx.stream_close_state, KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(client_conn->stream_count, 0u);
     EXPECT_EQ(ctx.client_ctx.stream_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.sent_packets.size(), 0u);
 
@@ -725,13 +1118,12 @@ TEST(kcpmux_lifecycle, conn_close_cascades_streams) {
     kcpmux_conn_close(client_conn);
     ctx.deliver_all();
 
-    // All streams should be closed
-    uint8_t s1_state = kcpmux_stream_get_state(stream1);
-    uint8_t s2_state = kcpmux_stream_get_state(stream2);
-    EXPECT_TRUE(s1_state == KCPMUX_STREAM_STATE_CLOSING ||
-                s1_state == KCPMUX_STREAM_STATE_CLOSED);
-    EXPECT_TRUE(s2_state == KCPMUX_STREAM_STATE_CLOSING ||
-                s2_state == KCPMUX_STREAM_STATE_CLOSED);
+    // All streams are finalized before the connection callback returns.
+    EXPECT_EQ(ctx.client_ctx.stream_close_count, 2);
+    EXPECT_EQ(ctx.client_ctx.stream_close_state, KCPMUX_STREAM_STATE_CLOSED);
+    EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(ctx.client_engine->stats.stream_count, 0u);
+    EXPECT_EQ(ctx.client_engine->conn_count, 0u);
 
     ctx.teardown();
 }

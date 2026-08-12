@@ -34,15 +34,12 @@ TEST_F(kcpmux_e2e_stream, create_multiple_streams) {
         ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
         uint8_t bootstrap = (uint8_t)(0x80 + i);
         ctx.client.send_data(&bootstrap, 1);
-        // Small delay between stream creation
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        ASSERT_TRUE(ctx.wait_until([&]() {
+            std::lock_guard<std::mutex> lock(ctx.server.mutex);
+            return ctx.server.accepted_streams.size() >=
+                   static_cast<size_t>(i + 1);
+        }, 3000));
     }
-
-    // Wait for server to accept all streams
-    ASSERT_TRUE(ctx.wait_until([&]() {
-        std::lock_guard<std::mutex> lock(ctx.server.mutex);
-        return ctx.server.accepted_streams.size() >= NUM_STREAMS;
-    }, 5000));
 
     // Verify all streams are created
     {
@@ -56,7 +53,7 @@ TEST_F(kcpmux_e2e_stream, independent_data_per_stream) {
     ctx.client.create_stream();
     ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
 
-    kcpmux_stream_t *client_stream1 = ctx.client.stream;
+    kcpmux_stream_t *client_stream1 = ctx.client.get_primary_stream();
     ASSERT_NE(client_stream1, nullptr);
     uint32_t stream_id1 = kcpmux_stream_id(client_stream1);
     uint8_t bootstrap1 = 0x11;
@@ -69,14 +66,13 @@ TEST_F(kcpmux_e2e_stream, independent_data_per_stream) {
     }, 3000));
 
     // Reset for second stream
-    ctx.client.stream = nullptr;
-    ctx.client.stream_state.store(-1);
+    ctx.client.reset_primary_stream();
 
     // Create second stream
     ctx.client.create_stream();
     ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
 
-    kcpmux_stream_t *client_stream2 = ctx.client.stream;
+    kcpmux_stream_t *client_stream2 = ctx.client.get_primary_stream();
     ASSERT_NE(client_stream2, nullptr);
     uint32_t stream_id2 = kcpmux_stream_id(client_stream2);
     uint8_t bootstrap2 = 0x22;
@@ -89,9 +85,6 @@ TEST_F(kcpmux_e2e_stream, independent_data_per_stream) {
         std::lock_guard<std::mutex> lock(ctx.server.mutex);
         return ctx.server.accepted_streams.size() >= 2;
     }, 3000));
-
-    // Give streams time to fully establish
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
     // Send different data on each stream
     std::string data1 = "Stream1-Data";
@@ -123,8 +116,9 @@ TEST_F(kcpmux_e2e_stream, close_one_stream_others_unaffected) {
     ctx.client.create_stream();
     ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
 
-    kcpmux_stream_t *client_stream1 = ctx.client.stream;
-    (void)client_stream1;  // Used for closing, not for data transfer
+    kcpmux_stream_t *client_stream1 = ctx.client.get_primary_stream();
+    ASSERT_NE(client_stream1, nullptr);
+    uint32_t stream_id1 = kcpmux_stream_id(client_stream1);
     uint8_t bootstrap1 = 0x31;
     ctx.client.send_data(&bootstrap1, 1);
 
@@ -134,13 +128,13 @@ TEST_F(kcpmux_e2e_stream, close_one_stream_others_unaffected) {
         return ctx.server.accepted_streams.size() >= 1;
     }, 3000));
 
-    ctx.client.stream = nullptr;
-    ctx.client.stream_state.store(-1);
+    ctx.client.reset_primary_stream();
 
     ctx.client.create_stream();
     ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
 
-    kcpmux_stream_t *client_stream2 = ctx.client.stream;
+    kcpmux_stream_t *client_stream2 = ctx.client.get_primary_stream();
+    ASSERT_NE(client_stream2, nullptr);
     uint32_t stream_id2 = kcpmux_stream_id(client_stream2);
     uint8_t bootstrap2 = 0x32;
     ctx.client.send_data(&bootstrap2, 1);
@@ -151,14 +145,13 @@ TEST_F(kcpmux_e2e_stream, close_one_stream_others_unaffected) {
         return ctx.server.accepted_streams.size() >= 2;
     }, 3000));
 
-    // Give streams time to fully establish
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
     // Close first stream
     ctx.client.queue_action([client_stream1]() { kcpmux_stream_close(client_stream1); });
 
-    // Wait for stream1 to close
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT_TRUE(ctx.wait_until([&]() {
+        return !ctx.client.has_active_stream(stream_id1) &&
+               !ctx.server.has_active_stream(stream_id1);
+    }, 3000));
 
     // Second stream should still work
     std::string test_data = "Stream2-Still-Works";
@@ -187,7 +180,9 @@ TEST_F(kcpmux_e2e_stream, server_creates_stream) {
     }, 3000));
 
     // Get stream ID
-    uint32_t stream_id = kcpmux_stream_id(ctx.server.stream);
+    kcpmux_stream_t *server_stream = ctx.server.get_primary_stream();
+    ASSERT_NE(server_stream, nullptr);
+    uint32_t stream_id = kcpmux_stream_id(server_stream);
 
     // Server sends data
     std::string test_data = "Server-Created-Stream";

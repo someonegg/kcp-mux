@@ -28,6 +28,17 @@ static void __conn_free(list_head *entry) {
     (void)entry;
 }
 
+static void kcpmux_engine_drain_pending_release(kcpmux_engine_t *engine) {
+    while (!list_empty(&engine->pending_release_list)) {
+        kcpmux_pending_release_t *item = list_first_entry(
+            &engine->pending_release_list, kcpmux_pending_release_t, node);
+        list_del_init(&item->node);
+        if (item->release_cb) {
+            item->release_cb(item);
+        }
+    }
+}
+
 // ============================================================================
 // Configuration init
 // ============================================================================
@@ -74,6 +85,11 @@ kcpmux_engine_t *kcpmux_engine_create(
     if (!engine) return NULL;
 
     memset(engine, 0, sizeof(*engine));
+    INIT_LIST_HEAD(&engine->pending_release_list);
+    if (kcpmux_timer_manager_init(&engine->timer_manager) != KCPMUX_ERR_OK) {
+        free(engine);
+        return NULL;
+    }
 
     // Config
     if (config) {
@@ -110,12 +126,10 @@ kcpmux_engine_t *kcpmux_engine_create(
     // Create connection hash table
     engine->conn_map = kcpmux_htb_new(64, __conn_cmp, __conn_free);
     if (!engine->conn_map) {
+        kcpmux_timer_manager_destroy(&engine->timer_manager);
         free(engine);
         return NULL;
     }
-
-    // Schedule first timer
-    kcpmux_engine_schedule_timer(engine, kcpmux_engine_now(engine));
 
     return engine;
 }
@@ -123,9 +137,9 @@ kcpmux_engine_t *kcpmux_engine_create(
 void kcpmux_engine_destroy(kcpmux_engine_t *engine) {
     if (!engine) return;
 
-    // Free all connections
-    // Iterate hash table, free each connection
-    // Note: conn_free will auto-close and trigger stream and conn close_notify
+    engine->destroying = 1;
+    kcpmux_engine_operation_enter(engine);
+    // Finalize all connections through the normal ownership path.
     while (engine->conn_count > 0) {
         // Get first connection from hash table
         list_head *node = NULL;
@@ -136,14 +150,17 @@ void kcpmux_engine_destroy(kcpmux_engine_t *engine) {
         }
         if (node) {
             kcpmux_conn_t *conn = list_entry(node, kcpmux_conn_t, hash_node);
-            kcpmux_conn_free(conn);
+            kcpmux_conn_close_internal(conn, KCPMUX_CLOSE_REASON_NORMAL);
         } else {
             break;
         }
     }
 
-    // Destroy hash table
+    kcpmux_engine_operation_leave(engine);
+
+    // All pending releases have drained at the operation boundary.
     kcpmux_htb_destroy(engine->conn_map);
+    kcpmux_timer_manager_destroy(&engine->timer_manager);
 
     free(engine);
 }
@@ -164,18 +181,30 @@ void kcpmux_engine_set_config(kcpmux_engine_t *engine,
 void kcpmux_engine_update(kcpmux_engine_t *engine) {
     if (!engine) return;
     int64_t now = kcpmux_engine_now(engine);
+    list_head due_list;
 
-    // Update all connections
-    for (int i = 0; i < engine->conn_map->size; i++) {
-        list_head *pos, *tmp;
-        list_for_each_safe(pos, tmp, &engine->conn_map->hashtable[i]) {
-            kcpmux_conn_t *conn = list_entry(pos, kcpmux_conn_t, hash_node);
-            kcpmux_conn_update(conn, now);
+    // An update consumes the currently armed one-shot. This is also safe for
+    // explicit early updates: the current root will simply be armed again.
+    engine->external_timer_armed = 0;
+
+    INIT_LIST_HEAD(&due_list);
+    kcpmux_timer_collect_due(&engine->timer_manager, now, &due_list);
+
+    kcpmux_engine_operation_enter(engine);
+    while (!list_empty(&due_list)) {
+        kcpmux_timer_node_t *node = list_first_entry(
+            &due_list, kcpmux_timer_node_t, due_link);
+        list_del_init(&node->due_link);
+        node->state = KCPMUX_TIMER_RUNNING;
+        engine->timer_dispatch_count++;
+        if (node->timeout_cb) {
+            node->timeout_cb(node, now);
+        }
+        if (node->state == KCPMUX_TIMER_RUNNING) {
+            node->state = KCPMUX_TIMER_IDLE;
         }
     }
-
-    // Schedule next timer
-    kcpmux_engine_schedule_timer(engine, now);
+    kcpmux_engine_operation_leave(engine);
 }
 
 int kcpmux_engine_input(kcpmux_engine_t *engine,
@@ -184,13 +213,18 @@ int kcpmux_engine_input(kcpmux_engine_t *engine,
 {
     if (!engine || !buf || size == 0 || !peer_addr || !peer_addr->addr) return -KCPMUX_ERR_INVALID_PARAM;
 
+    kcpmux_engine_operation_enter(engine);
+
     // Update rx statistics
     engine->stats.rx_packets++;
     engine->stats.rx_bytes += size;
 
     // Find or create connection to handle packet
     // Implementation is in kcpmux_protocol.c
-    return kcpmux_protocol_input(engine, buf, size, peer_addr, kcpmux_engine_now(engine));
+    int ret = kcpmux_protocol_input(
+        engine, buf, size, peer_addr, kcpmux_engine_now(engine));
+    kcpmux_engine_operation_leave(engine);
+    return ret;
 }
 
 // ============================================================================
@@ -201,25 +235,138 @@ int64_t kcpmux_engine_now(kcpmux_engine_t *engine) {
     return engine ? engine->callbacks.monotonic_time_ms(engine->user_data) : 0;
 }
 
-void kcpmux_engine_schedule_timer(kcpmux_engine_t *engine, int64_t now) {
-    if (!engine || !engine->callbacks.set_timer) return;
+void kcpmux_engine_operation_enter(kcpmux_engine_t *engine) {
+    if (engine) {
+        engine->operation_depth++;
+    }
+}
 
-    // Calculate next wakeup time (default 10ms)
-    int64_t min_interval = 10;
+void kcpmux_engine_operation_leave(kcpmux_engine_t *engine) {
+    if (!engine || engine->operation_depth == 0) {
+        return;
+    }
+    engine->operation_depth--;
+    if (engine->operation_depth != 0) {
+        return;
+    }
+    // Drain releases inside the operation boundary so release hooks cannot
+    // expose partially drained ownership state.
+    engine->operation_depth = 1;
+    kcpmux_engine_drain_pending_release(engine);
+    engine->operation_depth = 0;
+    kcpmux_engine_rearm_timer(engine, kcpmux_engine_now(engine));
+}
 
-    // Iterate all connections, get minimum wakeup interval
-    for (int i = 0; i < engine->conn_map->size; i++) {
-        list_head *pos;
-        list_for_each(pos, &engine->conn_map->hashtable[i]) {
-            kcpmux_conn_t *conn = list_entry(pos, kcpmux_conn_t, hash_node);
-            int64_t conn_interval = kcpmux_conn_check_interval(conn, now);
-            if (conn_interval > 0 && conn_interval < min_interval) {
-                min_interval = conn_interval;
-            }
-        }
+void kcpmux_engine_queue_release(kcpmux_engine_t *engine,
+                                kcpmux_pending_release_t *item,
+                                kcpmux_release_cb release_cb) {
+    if (!engine || !item || !release_cb) {
+        return;
+    }
+    item->release_cb = release_cb;
+    list_add_tail(&item->node, &engine->pending_release_list);
+}
+
+int kcpmux_engine_register_timer_node(kcpmux_engine_t *engine,
+                                     kcpmux_timer_node_t *node,
+                                     void *owner,
+                                     kcpmux_timer_cb timeout_cb) {
+    int ret;
+    size_t required_capacity;
+
+    if (!engine || !node || !owner || !timeout_cb) {
+        return KCPMUX_ERR_INVALID_PARAM;
+    }
+    if (engine->timer_node_count > SIZE_MAX - 2) {
+        return KCPMUX_ERR_OOM;
+    }
+    // Scheduling a successfully registered owner must not be the first
+    // operation that needs to grow the heap.
+    required_capacity = engine->timer_node_count + 1;
+    ret = kcpmux_timer_manager_reserve(&engine->timer_manager,
+                                      required_capacity);
+    if (ret != KCPMUX_ERR_OK) {
+        return ret;
+    }
+    kcpmux_timer_node_init(node, owner, timeout_cb);
+    engine->timer_node_count++;
+    return KCPMUX_ERR_OK;
+}
+
+void kcpmux_engine_unregister_timer_node(kcpmux_engine_t *engine,
+                                        kcpmux_timer_node_t *node) {
+    int64_t now;
+
+    if (!engine || !node || !node->owner) {
+        return;
+    }
+    now = kcpmux_engine_now(engine);
+    kcpmux_timer_cancel(&engine->timer_manager, node);
+    node->owner = NULL;
+    node->timeout_cb = NULL;
+    if (engine->timer_node_count > 0) {
+        engine->timer_node_count--;
+    }
+    kcpmux_engine_rearm_timer(engine, now);
+}
+
+int kcpmux_engine_schedule_timer_node(kcpmux_engine_t *engine,
+                                     kcpmux_timer_node_t *node,
+                                     int64_t deadline_ms,
+                                     int64_t now_ms) {
+    int ret;
+
+    if (!engine || !node || !node->owner) {
+        return KCPMUX_ERR_INVALID_PARAM;
+    }
+    if (deadline_ms < now_ms) {
+        deadline_ms = now_ms;
+    }
+    ret = kcpmux_timer_schedule(&engine->timer_manager, node, deadline_ms);
+    if (ret == KCPMUX_ERR_OK) {
+        kcpmux_engine_rearm_timer(engine, now_ms);
+    }
+    return ret;
+}
+
+void kcpmux_engine_cancel_timer_node(kcpmux_engine_t *engine,
+                                    kcpmux_timer_node_t *node,
+                                    int64_t now_ms) {
+    if (!engine || !node) {
+        return;
+    }
+    kcpmux_timer_cancel(&engine->timer_manager, node);
+    kcpmux_engine_rearm_timer(engine, now_ms);
+}
+
+void kcpmux_engine_rearm_timer(kcpmux_engine_t *engine, int64_t now_ms) {
+    kcpmux_timer_node_t *root;
+    int64_t deadline_ms;
+    uint64_t delay_ms;
+
+    if (!engine || !engine->callbacks.set_timer || engine->operation_depth > 0) {
+        return;
     }
 
-    engine->callbacks.set_timer((uint64_t)min_interval, engine->user_data);
+    root = kcpmux_timer_peek(&engine->timer_manager);
+    if (!root) {
+        // There is no cancel callback. The previous one-shot may fire once and
+        // will observe an empty heap without rearming.
+        return;
+    }
+    deadline_ms = root->deadline_ms;
+    if (engine->external_timer_armed &&
+        engine->external_timer_deadline_ms == deadline_ms) {
+        return;
+    }
+
+    delay_ms = deadline_ms <= now_ms
+        ? 0
+        : (uint64_t)deadline_ms - (uint64_t)now_ms;
+    // Publish the requested one-shot before invoking the host callback.
+    engine->external_timer_armed = 1;
+    engine->external_timer_deadline_ms = deadline_ms;
+    engine->callbacks.set_timer(delay_ms, engine->user_data);
 }
 
 int kcpmux_engine_write_socket(kcpmux_engine_t *engine,
@@ -242,21 +389,23 @@ int kcpmux_engine_write_socket(kcpmux_engine_t *engine,
 }
 
 void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn) {
-    if (!engine || !conn) return;
+    if (!engine || !conn || conn->internal_closed || conn->in_engine_map) return;
 
     uint32_t hash = kcpmux_hash32(conn->peer_addr.addr, conn->peer_addr.addrlen);
     kcpmux_htb_add(engine->conn_map, &conn->hash_node, &conn->peer_addr, hash);
     engine->conn_count++;
+    conn->in_engine_map = 1;
 
     // Update engine stats
     engine->stats.conn_count = engine->conn_count;
 }
 
 void kcpmux_engine_remove_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn) {
-    if (!engine || !conn) return;
+    if (!engine || !conn || !conn->in_engine_map) return;
 
     kcpmux_htb_del(engine->conn_map, &conn->hash_node);
     engine->conn_count--;
+    conn->in_engine_map = 0;
 
     // Update engine stats
     engine->stats.conn_count = engine->conn_count;

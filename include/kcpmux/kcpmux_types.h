@@ -15,7 +15,7 @@ typedef struct kcpmux_stream_s kcpmux_stream_t;
 // Protocol constants
 // ============================================================================
 
-#define KCPMUX_VERSION                 2       // Protocol version
+#define KCPMUX_VERSION                 3       // Protocol version
 #define KCPMUX_ADDR_MAX_LEN            64      // Max address length
 #define KCPMUX_PROTO_EXT_MAX_LEN       512     // Max extension data length
 
@@ -32,7 +32,7 @@ typedef struct kcpmux_addr_s {
 // Status codes
 // ============================================================================
 
-// Common status codes.
+// Common status codes kept local so kcpmux remains standalone.
 #define KCPMUX_ERR_OK                        0
 #define KCPMUX_ERR_NOK                       1
 #define KCPMUX_ERR_TIMEOUT                   2
@@ -60,6 +60,7 @@ typedef struct kcpmux_addr_s {
 // kcpmux-specific negative API errors.
 #define KCPMUX_ERR_STATE                     -200    // mismatch state
 #define KCPMUX_ERR_CLOSED                    -201    // already closed
+#define KCPMUX_ERR_BUFFER_TOO_SMALL           -202    // receive buffer cannot hold next message
 #define KCPMUX_ERR_KCPRET(kcp_ret)          (-300 + (kcp_ret))
 
 // ACK Result codes (connection handshake)
@@ -75,6 +76,7 @@ typedef struct kcpmux_addr_s {
 #define KCPMUX_CLOSE_REASON_REJECTED         0x03    // Rejected by upper layer
 #define KCPMUX_CLOSE_REASON_IDLE             0x04    // Idle Close
 #define KCPMUX_CLOSE_REASON_TIMEOUT          0x05    // Timeout
+#define KCPMUX_CLOSE_REASON_REPLACED         0x06    // Replaced by a new generation
 
 // ============================================================================
 // Connection state
@@ -142,10 +144,10 @@ typedef struct kcpmux_conn_config_s {
     // Control Message
     uint32_t ctrl_timeout_ms;         // Control Message timeout
     uint32_t connect_retries;         // Connect retries
-    uint32_t close_retries;           // Close retries
+    uint32_t close_retries;           // Retransmissions after the initial CLOSE
 
     // Keepalive
-    uint32_t keepalive_interval_ms;   // Heartbeat interval
+    uint32_t keepalive_interval_ms;   // Heartbeat interval (0 disables sending)
     uint32_t keepalive_timeout_ms;    // Heartbeat response timeout
 
     // Idle management
@@ -155,10 +157,10 @@ typedef struct kcpmux_conn_config_s {
 typedef struct kcpmux_stream_config_s {
     // Control Message
     uint32_t ctrl_timeout_ms;         // Control Message timeout
-    uint32_t close_retries;           // Close retries
+    uint32_t close_retries;           // Retransmissions after the initial CLOSE
 
     // KCP parameters
-    uint16_t kcp_mss;                 // MTU = ... + MPCKP header (4) + KCP header + mss
+    uint16_t kcp_mss;                 // MTU = ... + KCPMUX header (8) + KCP header + mss
     uint32_t send_pause_threshold;    // Pause sending when waitsnd >= this value
     uint32_t send_resume_threshold;   // Resume sending when waitsnd < this value
 } kcpmux_stream_config_t;
@@ -239,24 +241,38 @@ typedef struct kcpmux_stream_stats_s {
 // ============================================================================
 
 typedef struct kcpmux_engine_callbacks_s {
-    // Timer callback - notify upper layer of next wakeup time
+    // Callbacks run synchronously on the engine's single event-loop thread.
+    // They must only perform their documented responsibility and must not call
+    // any kcpmux_* API. Unsupported callback reentry has undefined behavior.
+    // Timer callback - notify upper layer of next wakeup time.
+    // The event-loop is single-threaded. Each call replaces the previous
+    // one-shot timer, and wake_after_ms == 0 requests an asynchronous wakeup;
+    // it must not call kcpmux_engine_update() before set_timer returns.
+    // The host destroys that timer before engine destruction and must never
+    // call kcpmux_engine_update() after kcpmux_engine_destroy().
     void (*set_timer)(uint64_t wake_after_ms, void *user_data);
 
-    // Send data callback - upper layer handles actual socket send
+    // Send data callback - upper layer handles actual socket send without
+    // synchronously feeding packets or other work back into kcpmux.
     // Return: 1 on success, 0 on error
     int (*write_socket)(const uint8_t *buf, unsigned size,
                            const kcpmux_addr_t *addr, void *user_data);
 
-    // Log callback
+    // Log callback - only consumes the supplied log record.
     void (*log_write)(int level, const char *buf, unsigned size, void *user_data);
 
-    // Get timestamps
+    // Get timestamps - only returns the current monotonic time.
     int64_t (*monotonic_time_ms)(void *user_data);
 
-    // Connection notification (remote initiated)
+    // Connection notification (remote initiated). During this callback, only
+    // getters plus kcpmux_conn_set_config() and kcpmux_conn_set_callbacks() may
+    // be called for conn. No other kcpmux_* API is allowed.
     // Note: conn is already added to engine's lookup table when this callback is invoked.
     // If this callback is NULL, passive connection creation is disabled.
-    // Return KCPMUX_ACK_RESULT_OK to accept, other values to reject (conn will be freed).
+    // Return KCPMUX_ACK_RESULT_OK to accept; other values reject it. A rejected
+    // conn handle must not be retained after this callback returns. Callbacks
+    // and user_data installed on a rejected conn are discarded without a close
+    // notification.
     int (*conn_connect_notify)(kcpmux_conn_t *conn,
                                const kcpmux_proto_ext_t *proto_ext,
                                kcpmux_proto_ext_t *resp_proto_ext,
@@ -264,23 +280,38 @@ typedef struct kcpmux_engine_callbacks_s {
 } kcpmux_engine_callbacks_t;
 
 typedef struct kcpmux_conn_callbacks_s {
+    // Notifications may update external state or enqueue asynchronous work.
+    // They must not call any kcpmux_* API. Only the close notification may
+    // release the external wrapper associated with user_data; it must remain
+    // valid across state notifications.
     // Connection state change notification
     void (*conn_state_changed)(kcpmux_conn_t *conn, uint8_t old_state,
                                uint8_t new_state, void *user_data);
 
     // Connection close notification
     // Note: conn state is CLOSED or ERROR when this callback is invoked.
-    // The conn object remains valid after this callback returns.
-    // User must call kcpmux_conn_free() to release the connection memory.
+    // The handle may only be used to identify the external wrapper and becomes
+    // invalid when this callback returns.
     void (*conn_close_notify)(kcpmux_conn_t *conn, int reason, void *user_data);
 
     // Stream creation notification (remote initiated by payload auto-create)
     // Note: stream is already added to connection's lookup table when this callback is invoked.
     // If this callback is NULL, passive stream creation is disabled.
-    void (*stream_create_notify)(kcpmux_stream_t *stream, void *user_data);
+    // During this callback, only getters plus kcpmux_stream_set_config() and
+    // kcpmux_stream_set_callbacks() may be called for stream. Return 0 to take
+    // ownership and accept the first payload; return non-zero to reject it.
+    // Before rejecting, release any external resources allocated here and do
+    // not retain the stream handle. Installed stream callbacks and user_data are
+    // discarded without a close notification. The rejection value is not sent
+    // on wire.
+    int (*stream_create_notify)(kcpmux_stream_t *stream, void *user_data);
 } kcpmux_conn_callbacks_t;
 
 typedef struct kcpmux_stream_callbacks_s {
+    // Notifications may update external state or enqueue asynchronous work.
+    // They must not call any kcpmux_* API. Only the close notification may
+    // release the external wrapper associated with user_data; it must remain
+    // valid across state, read, and write notifications.
     // Stream state change notification
     void (*stream_state_changed)(kcpmux_stream_t *stream, uint8_t old_state,
                                  uint8_t new_state, void *user_data);
@@ -295,8 +326,8 @@ typedef struct kcpmux_stream_callbacks_s {
 
     // Stream close notification
     // Note: stream state is CLOSED or ERROR when this callback is invoked.
-    // The stream object remains valid after this callback returns.
-    // User must call kcpmux_stream_free() to release the stream memory.
+    // The handle may only be used to identify the external wrapper and becomes
+    // invalid when this callback returns.
     void (*stream_close_notify)(kcpmux_stream_t *stream, int reason, void *user_data);
 } kcpmux_stream_callbacks_t;
 

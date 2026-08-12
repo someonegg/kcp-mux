@@ -24,6 +24,7 @@ add_library(kcpmux STATIC
     src/kcpmux_conn.c
     src/kcpmux_stream.c
     src/kcpmux_protocol.c
+    src/kcpmux_timer.c
 )
 
 add_library(kcp-mux::kcpmux ALIAS kcpmux)

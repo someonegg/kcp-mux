@@ -13,6 +13,9 @@ extern "C" {
 // ============================================================================
 
 typedef struct kcpmux_kcp_ops_s {
+    // All operations must return synchronously and must not call kcpmux_* APIs.
+    // An installed output callback may only reach the non-reentrant engine
+    // write_socket callback.
     // ========================================================================
     // Lifecycle
     // ========================================================================

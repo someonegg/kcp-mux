@@ -5,9 +5,10 @@ This directory contains a small UDP client/server demo for `kcp-mux`.
 The demo shows the minimum integration path:
 
 - create a `kcpmux_engine_t`
-- drive engine timers from a socket loop
+- replace the one-shot engine timer from `set_timer` and dispatch it when due
 - feed UDP packets into `kcpmux_engine_input`
 - send UDP packets from the `write_socket` callback
+- defer read/write API calls out of notification callbacks into the event loop
 - open multiple streams on one connection
 - echo data back on each stream
 

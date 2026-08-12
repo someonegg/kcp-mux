@@ -20,6 +20,8 @@ add_executable(kcpmux_tests
     kcpmux_lifecycle_test.cc
     kcpmux_protocol_test.cc
     kcpmux_stats_test.cc
+    kcpmux_stream_timer_test.cc
+    kcpmux_timer_test.cc
 )
 
 target_compile_features(kcpmux_tests PRIVATE cxx_std_17)

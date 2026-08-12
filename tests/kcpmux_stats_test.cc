@@ -146,13 +146,6 @@ TEST(kcpmux_stats_engine, conn_lifecycle) {
     // Check conn_closed incremented
     kcpmux_engine_get_stats(ctx.client_engine, &stats_after);
     EXPECT_EQ(stats_after.conn_closed_total, 1u);
-    EXPECT_EQ(stats_after.conn_count, 1u);  // Still 1 until conn_free is called
-
-    // Free the connection
-    kcpmux_conn_free(client_conn);
-
-    // Check conn_count is now 0
-    kcpmux_engine_get_stats(ctx.client_engine, &stats_after);
     EXPECT_EQ(stats_after.conn_count, 0u);
 
     ctx.teardown();
@@ -240,13 +233,6 @@ TEST(kcpmux_stats_engine, stream_lifecycle) {
     // Check stream_closed incremented
     kcpmux_engine_get_stats(ctx.client_engine, &stats);
     EXPECT_EQ(stats.stream_closed_total, 1u);
-    EXPECT_EQ(stats.stream_count, 1u);  // Still 1 until stream_free is called
-
-    // Free the stream
-    kcpmux_stream_free(client_stream);
-
-    // Check stream_count is now 0
-    kcpmux_engine_get_stats(ctx.client_engine, &stats);
     EXPECT_EQ(stats.stream_count, 0u);
 
     ctx.teardown();

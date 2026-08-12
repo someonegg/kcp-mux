@@ -16,6 +16,8 @@ typedef struct demo_client_stream_s {
     char payload[DEMO_PAYLOAD_LEN];
     size_t payload_len;
     size_t received_len;
+    uint32_t stream_id;
+    int readable;
     int done;
 } demo_client_stream_t;
 
@@ -33,6 +35,7 @@ struct demo_client_s {
 };
 
 static void demo_client_stream_read_notify(kcpmux_stream_t *stream, void *user_data);
+static int demo_client_process_reads(demo_client_t *client);
 
 static void
 demo_client_usage(const char *prog)
@@ -126,6 +129,9 @@ demo_client_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
     demo_client_t *client = (demo_client_t *)user_data;
     (void)conn;
 
+    client->conn = NULL;
+    client->connected = 0;
+
     if (!client->endpoint.quiet) {
         printf("client connection closed reason=%d\n", reason);
         fflush(stdout);
@@ -137,9 +143,17 @@ demo_client_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_
 {
     demo_client_stream_t *client_stream = (demo_client_stream_t *)user_data;
 
+    (void)stream;
+
     if (client_stream != NULL && !client_stream->client->endpoint.quiet) {
-        printf("client stream=%u closed reason=%d\n", kcpmux_stream_id(stream), reason);
+        printf("client stream=%u closed reason=%d\n", client_stream->stream_id, reason);
         fflush(stdout);
+    }
+    if (client_stream != NULL) {
+        client_stream->stream = NULL;
+        if (!client_stream->done) {
+            client_stream->done = -1;
+        }
     }
 }
 
@@ -195,6 +209,7 @@ demo_client_start_streams(demo_client_t *client)
         if (client_stream->stream == NULL) {
             return -1;
         }
+        client_stream->stream_id = kcpmux_stream_id(client_stream->stream);
 
         sent = kcpmux_stream_send(client_stream->stream,
                                   (const uint8_t *)client_stream->payload,
@@ -218,38 +233,68 @@ static void
 demo_client_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
 {
     demo_client_stream_t *client_stream = (demo_client_stream_t *)user_data;
-    uint8_t buf[4096];
-    int ret;
-
     (void)stream;
 
-    while ((ret = kcpmux_stream_recv(client_stream->stream, buf, sizeof(buf))) > 0) {
-        size_t remaining;
+    client_stream->readable = 1;
+}
 
-        if (client_stream->done) {
+static int
+demo_client_process_reads(demo_client_t *client)
+{
+    uint8_t buf[4096];
+
+    for (unsigned i = 0; i < client->streams_count; i++) {
+        demo_client_stream_t *client_stream = &client->streams[i];
+
+        if (!client_stream->readable || client_stream->stream == NULL) {
             continue;
         }
+        client_stream->readable = 0;
 
-        remaining = client_stream->payload_len - client_stream->received_len;
-        if ((size_t)ret > remaining
-            || memcmp(client_stream->payload + client_stream->received_len, buf, (size_t)ret) != 0)
-        {
-            fprintf(stderr, "client received unexpected echo on stream=%u\n",
-                    kcpmux_stream_id(client_stream->stream));
-            client_stream->done = -1;
-            return;
-        }
+        for (;;) {
+            int message_size = kcpmux_stream_peek_size(client_stream->stream);
+            int ret;
+            size_t remaining;
 
-        client_stream->received_len += (size_t)ret;
-        if (client_stream->received_len == client_stream->payload_len) {
-            client_stream->done = 1;
-            if (!client_stream->client->endpoint.quiet) {
-                printf("client received echo stream=%u bytes=%zu\n",
-                       kcpmux_stream_id(client_stream->stream), client_stream->received_len);
-                fflush(stdout);
+            if (message_size == 0) {
+                break;
+            }
+            if (message_size < 0 || (size_t)message_size > sizeof(buf)) {
+                return -1;
+            }
+            ret = kcpmux_stream_recv(client_stream->stream, buf, sizeof(buf));
+            if (ret <= 0) {
+                return -1;
+            }
+
+            if (client_stream->done) {
+                continue;
+            }
+
+            remaining = client_stream->payload_len - client_stream->received_len;
+            if ((size_t)ret > remaining
+                || memcmp(client_stream->payload + client_stream->received_len,
+                          buf, (size_t)ret) != 0)
+            {
+                fprintf(stderr, "client received unexpected echo on stream=%u\n",
+                        client_stream->stream_id);
+                client_stream->done = -1;
+                return -1;
+            }
+
+            client_stream->received_len += (size_t)ret;
+            if (client_stream->received_len == client_stream->payload_len) {
+                client_stream->done = 1;
+                if (!client->endpoint.quiet) {
+                    printf("client received echo stream=%u bytes=%zu\n",
+                           client_stream->stream_id, client_stream->received_len);
+                    fflush(stdout);
+                }
             }
         }
     }
+
+    return 0;
 }
 
 static int
@@ -329,6 +374,11 @@ main(int argc, char **argv)
 
         if (demo_endpoint_poll(&client.endpoint, 10) != 0) {
             fprintf(stderr, "client event loop failed\n");
+            demo_endpoint_cleanup(&client.endpoint);
+            return 1;
+        }
+        if (demo_client_process_reads(&client) != 0) {
+            fprintf(stderr, "client failed to receive echo\n");
             demo_endpoint_cleanup(&client.endpoint);
             return 1;
         }

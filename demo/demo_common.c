@@ -12,6 +12,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define DEMO_NO_WAKEUP INT64_MAX
+
 int
 demo_parse_port(const char *value, unsigned short *port)
 {
@@ -212,7 +214,7 @@ demo_endpoint_init(demo_endpoint_t *endpoint,
 
     endpoint->app_user_data = user_data;
     endpoint->engine = kcpmux_engine_create(NULL, NULL, NULL, callbacks, endpoint, NULL);
-    endpoint->next_wakeup_ms = demo_monotonic_time_ms();
+    endpoint->next_wakeup_ms = DEMO_NO_WAKEUP;
     return endpoint->engine != NULL ? 0 : -1;
 }
 
@@ -224,6 +226,7 @@ demo_endpoint_cleanup(demo_endpoint_t *endpoint)
     }
 
     if (endpoint->engine != NULL) {
+        endpoint->next_wakeup_ms = DEMO_NO_WAKEUP;
         kcpmux_engine_destroy(endpoint->engine);
         endpoint->engine = NULL;
     }
@@ -263,7 +266,6 @@ demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
     ret = select(endpoint->fd + 1, &readfds, NULL, NULL, &tv);
     if (ret < 0) {
         if (errno == EINTR) {
-            kcpmux_engine_update(endpoint->engine);
             return 0;
         }
         return -1;
@@ -283,7 +285,11 @@ demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
         }
     }
 
-    kcpmux_engine_update(endpoint->engine);
+    now = demo_monotonic_time_ms();
+    if (endpoint->next_wakeup_ms <= now) {
+        endpoint->next_wakeup_ms = DEMO_NO_WAKEUP;
+        kcpmux_engine_update(endpoint->engine);
+    }
     return 0;
 }
 
@@ -292,7 +298,10 @@ demo_set_timer(uint64_t wake_after_ms, void *user_data)
 {
     demo_endpoint_t *endpoint = (demo_endpoint_t *)user_data;
     if (endpoint != NULL) {
-        endpoint->next_wakeup_ms = demo_monotonic_time_ms() + (int64_t)wake_after_ms;
+        int64_t now = demo_monotonic_time_ms();
+        endpoint->next_wakeup_ms = wake_after_ms > (uint64_t)(INT64_MAX - now)
+            ? INT64_MAX
+            : now + (int64_t)wake_after_ms;
     }
 }
 

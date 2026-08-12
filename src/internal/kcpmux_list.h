@@ -12,6 +12,8 @@ typedef struct list_head {
 } list_head;
 
 #define list_entry(ptr, type, member) kcpmux_container_of(ptr, type, member)
+#define list_first_entry(ptr, type, member) \
+    list_entry((ptr)->next, type, member)
 
 static inline void list_init(list_head *list)
 {
@@ -50,6 +52,22 @@ static inline void list_del(list_head *entry)
     entry->prev->next = entry->next;
     entry->next = entry;
     entry->prev = entry;
+}
+
+static inline void list_del_init(list_head *entry)
+{
+    list_del(entry);
+}
+
+static inline list_head *list_dequeue(list_head *head)
+{
+    list_head *entry = head->next;
+    if (entry == head) {
+        return NULL;
+    }
+    entry->next->prev = entry->prev;
+    entry->prev->next = entry->next;
+    return entry;
 }
 
 static inline void list_move_tail(list_head *entry, list_head *head)

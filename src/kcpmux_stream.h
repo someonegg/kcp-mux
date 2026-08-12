@@ -1,9 +1,8 @@
 #ifndef __KCPMUX_STREAM_H__
 #define __KCPMUX_STREAM_H__
 
-#include "kcpmux_types.h"
+#include "kcpmux_engine.h"
 #include "kcpmux_kcp.h"
-#include "kcpmux_list.h"
 
 // ============================================================================
 // Stream internal structure
@@ -16,9 +15,10 @@ struct kcpmux_stream_s {
     uint8_t                   state;           // Stream state
     uint8_t                   is_initiator;    // Is stream initiator
     uint8_t                   internal_closed; // If internal closed
-    kcpmux_conn_t             *conn;            // Owning connection
-    kcpmux_stream_config_t     config;          // Stream config
-    kcpmux_stream_callbacks_t  callbacks;       // Stream callbacks
+    uint8_t                   in_stream_map;   // Hash membership guard
+    kcpmux_conn_t            *conn;            // Owning connection
+    kcpmux_stream_config_t    config;          // Stream config
+    kcpmux_stream_callbacks_t callbacks;       // Stream callbacks
     void                     *user_data;       // User data
 
     void                     *kcp;             // KCP instance
@@ -28,11 +28,11 @@ struct kcpmux_stream_s {
     uint32_t                  retry_count;     // Retry count
 
     // Close state
-    int64_t                   close_ts;        // Close initiation time
     uint8_t                   close_reason;    // Close reason
 
-    // Next update timestamp
-    int64_t                   next_update_ts;  // Next update timestamp (ms)
+    // Absolute deadline timer
+    kcpmux_timer_node_t       timer_node;
+    kcpmux_pending_release_t  pending_release;
 
     // Flow control state
     uint8_t                   read_blocked;    // Is read blocked
@@ -43,7 +43,7 @@ struct kcpmux_stream_s {
     int64_t                   write_block_start_ts;  // Write block start time (ms)
 
     // Statistics
-    kcpmux_stream_stats_t      stats;
+    kcpmux_stream_stats_t     stats;
 };
 
 // ============================================================================
@@ -56,14 +56,14 @@ kcpmux_stream_t *kcpmux_stream_new(kcpmux_conn_t *conn,
                                  const kcpmux_stream_config_t *config,
                                  uint8_t is_initiator);
 
-// Close stream internally (does not free memory)
+// Finalize a stream and queue its physical release.
 void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason);
 
 // Update stream state
 void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now);
 
-// Get next check interval
-int64_t kcpmux_stream_check_interval(kcpmux_stream_t *stream, int64_t now);
+// Refresh the stream's absolute deadline from its current state.
+void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now);
 
 // State change
 void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state);

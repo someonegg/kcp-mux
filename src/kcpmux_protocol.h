@@ -19,9 +19,6 @@
 // Maximum protocol message length (stack buffer size)
 #define KCPMUX_PROTO_MSG_MAX_LEN      1500
 
-// 24-bit stream ID max value
-#define KCPMUX_STREAM_ID_MAX          0xFFFFFF
-
 // ============================================================================
 // Protocol handling functions
 // ============================================================================

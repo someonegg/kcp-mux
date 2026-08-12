@@ -29,7 +29,7 @@ kcpmux_engine_t *kcpmux_engine_create(
     void *user_data,
     const kcpmux_kcp_ops_t * kcp_ops);
 
-// Destroy engine (cascade free all connections)
+// Destroy engine (cascade close and release all connections)
 void kcpmux_engine_destroy(kcpmux_engine_t *engine);
 
 // Set engine configuration
@@ -42,7 +42,8 @@ int kcpmux_engine_input(kcpmux_engine_t *engine,
                        const uint8_t *buf, unsigned size,
                        const kcpmux_addr_t *peer_addr);
 
-// Drive main logic (call periodically)
+// Dispatch timer work due at the callback time. The host should call this from
+// the replaceable one-shot timer requested through set_timer, not periodically.
 void kcpmux_engine_update(kcpmux_engine_t *engine);
 
 // Find connection by address
@@ -57,6 +58,13 @@ void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *sta
 // Connection API
 // ============================================================================
 
+// Engines own connections, and connections own streams. Once an object reaches
+// CLOSED or ERROR, it is removed from lookup and released automatically. A
+// terminal handle passed to a close callback becomes invalid when that callback
+// returns; handles must never be used after their object terminates.
+// Unless explicitly allowed by the callback declaration, callbacks must not
+// call kcpmux_* APIs; enqueue work for a later event-loop turn instead.
+
 // Initiate connection
 kcpmux_conn_t *kcpmux_conn_connect(
     kcpmux_engine_t *engine,
@@ -66,12 +74,9 @@ kcpmux_conn_t *kcpmux_conn_connect(
     const kcpmux_conn_callbacks_t *callbacks,
     void *user_data);
 
-// Close connection (cascade close all streams)
+// Start closing a connection (terminal close cascades to all streams).
 // Return: 0 on success, < 0 on error
 int kcpmux_conn_close(kcpmux_conn_t *conn);
-
-// Free connection memory (will auto-close if not closed, cascade free all streams)
-void kcpmux_conn_free(kcpmux_conn_t *conn);
 
 // Set connection configuration
 void kcpmux_conn_set_config(kcpmux_conn_t *conn,
@@ -114,12 +119,9 @@ kcpmux_stream_t *kcpmux_stream_create(
     const kcpmux_stream_callbacks_t *callbacks,
     void *user_data);
 
-// Close stream
+// Start closing a stream.
 // Return: 0 on success, < 0 on error
 int kcpmux_stream_close(kcpmux_stream_t *stream);
-
-// Free stream memory (will auto-close if not closed)
-void kcpmux_stream_free(kcpmux_stream_t *stream);
 
 // Set stream configuration
 void kcpmux_stream_set_config(kcpmux_stream_t *stream,
@@ -130,7 +132,8 @@ void kcpmux_stream_set_callbacks(kcpmux_stream_t *stream,
                                 const kcpmux_stream_callbacks_t *callbacks,
                                 void *user_data);
 
-// Send data
+// Send data. A call larger than kcp_mss is split into multiple KCP messages,
+// each no larger than kcp_mss.
 // Parameters:
 //   flush - if non-zero, flush immediately; otherwise, flushed periodically by KCP update
 // Returns:
@@ -141,11 +144,19 @@ int kcpmux_stream_send(kcpmux_stream_t *stream,
                       const uint8_t *buf, unsigned size,
                       int flush);
 
-// Receive data
+// Return the size of the next complete KCP message without consuming it.
+// Returns:
+//   > 0: size of the next message
+//   = 0: no complete message available
+//   < 0: error code (KCPMUX_ERR_CLOSED, KCPMUX_ERR_STATE, etc.)
+int kcpmux_stream_peek_size(kcpmux_stream_t *stream);
+
+// Receive one complete KCP message. The buffer must be large enough for the
+// next message; use kcpmux_stream_peek_size() to determine the required size.
 // Returns:
 //   > 0: number of bytes received
-//   = 0: no data available or error, wait for stream_read_notify callback
-//   < 0: error code (KCPMUX_ERR_CLOSED, KCPMUX_ERR_STATE, etc.)
+//   = 0: no complete message available, wait for stream_read_notify callback
+//   < 0: error code (KCPMUX_ERR_BUFFER_TOO_SMALL, KCPMUX_ERR_CLOSED, etc.)
 int kcpmux_stream_recv(kcpmux_stream_t *stream,
                       uint8_t *buf, unsigned size);
 

@@ -141,8 +141,9 @@ TEST_F(kcpmux_e2e_basic, send_recv_small_data) {
     // Get stream ID
     uint32_t stream_id = 0;
     ASSERT_TRUE(ctx.wait_until([&]() {
-        if (ctx.client.stream) {
-            stream_id = kcpmux_stream_id(ctx.client.stream);
+        kcpmux_stream_t *stream = ctx.client.get_primary_stream();
+        if (stream) {
+            stream_id = kcpmux_stream_id(stream);
             return true;
         }
         return false;
@@ -181,8 +182,9 @@ TEST_F(kcpmux_e2e_basic, send_recv_bidirectional) {
     // Get stream ID
     uint32_t stream_id = 0;
     ASSERT_TRUE(ctx.wait_until([&]() {
-        if (ctx.client.stream) {
-            stream_id = kcpmux_stream_id(ctx.client.stream);
+        kcpmux_stream_t *stream = ctx.client.get_primary_stream();
+        if (stream) {
+            stream_id = kcpmux_stream_id(stream);
             return true;
         }
         return false;

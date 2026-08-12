@@ -8,15 +8,32 @@ typedef struct demo_server_s {
     demo_endpoint_t endpoint;
     const char *host;
     unsigned short port;
+    struct demo_server_stream_s *streams;
 } demo_server_t;
 
 typedef struct demo_server_stream_s {
     demo_server_t *server;
     kcpmux_stream_t *stream;
+    struct demo_server_stream_s *next;
+    uint32_t stream_id;
+    int readable;
+    int closed;
 } demo_server_stream_t;
 
 static void demo_server_stream_read_notify(kcpmux_stream_t *stream, void *user_data);
 static void demo_server_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data);
+static int demo_server_process_streams(demo_server_t *server);
+
+static void
+demo_server_cleanup(demo_server_t *server)
+{
+    demo_endpoint_cleanup(&server->endpoint);
+    while (server->streams != NULL) {
+        demo_server_stream_t *stream = server->streams;
+        server->streams = stream->next;
+        free(stream);
+    }
+}
 
 static void
 demo_server_usage(const char *prog)
@@ -89,7 +106,7 @@ demo_server_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
     }
 }
 
-static void
+static int
 demo_server_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
 {
     demo_server_t *server = (demo_server_t *)user_data;
@@ -98,11 +115,14 @@ demo_server_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
 
     server_stream = (demo_server_stream_t *)calloc(1, sizeof(*server_stream));
     if (server_stream == NULL) {
-        return;
+        return -1;
     }
 
     server_stream->server = server;
     server_stream->stream = stream;
+    server_stream->stream_id = kcpmux_stream_id(stream);
+    server_stream->next = server->streams;
+    server->streams = server_stream;
 
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.stream_read_notify = demo_server_stream_read_notify;
@@ -110,9 +130,10 @@ demo_server_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
     kcpmux_stream_set_callbacks(stream, &callbacks, server_stream);
 
     if (!server->endpoint.quiet) {
-        printf("server accepted stream=%u\n", kcpmux_stream_id(stream));
+        printf("server accepted stream=%u\n", server_stream->stream_id);
         fflush(stdout);
     }
+    return 0;
 }
 
 static int
@@ -146,17 +167,62 @@ static void
 demo_server_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
 {
     demo_server_stream_t *server_stream = (demo_server_stream_t *)user_data;
-    uint8_t buf[4096];
-    int ret;
+    (void)stream;
 
-    while ((ret = kcpmux_stream_recv(stream, buf, sizeof(buf))) > 0) {
-        int sent = kcpmux_stream_send(stream, buf, (unsigned)ret, 1);
-        if (!server_stream->server->endpoint.quiet) {
-            printf("server echo stream=%u bytes=%d sent=%d\n",
-                   kcpmux_stream_id(stream), ret, sent);
-            fflush(stdout);
+    server_stream->readable = 1;
+}
+
+static int
+demo_server_process_streams(demo_server_t *server)
+{
+    demo_server_stream_t **link = &server->streams;
+    uint8_t buf[4096];
+
+    while (*link != NULL) {
+        demo_server_stream_t *server_stream = *link;
+
+        if (server_stream->closed) {
+            *link = server_stream->next;
+            free(server_stream);
+            continue;
         }
+        if (!server_stream->readable) {
+            link = &server_stream->next;
+            continue;
+        }
+        server_stream->readable = 0;
+
+        for (;;) {
+            int message_size = kcpmux_stream_peek_size(server_stream->stream);
+            int received;
+            int sent;
+
+            if (message_size == 0) {
+                break;
+            }
+            if (message_size < 0 || (size_t)message_size > sizeof(buf)) {
+                return -1;
+            }
+            received = kcpmux_stream_recv(server_stream->stream, buf, sizeof(buf));
+            if (received <= 0 || server_stream->closed) {
+                return -1;
+            }
+            sent = kcpmux_stream_send(server_stream->stream, buf,
+                                      (unsigned)received, 1);
+            if (sent != received || server_stream->closed) {
+                return -1;
+            }
+
+            if (!server->endpoint.quiet) {
+                printf("server echo stream=%u bytes=%d sent=%d\n",
+                       server_stream->stream_id, received, sent);
+                fflush(stdout);
+            }
+        }
+        link = &server_stream->next;
     }
+
+    return 0;
 }
 
 static void
@@ -164,12 +230,16 @@ demo_server_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_
 {
     demo_server_stream_t *server_stream = (demo_server_stream_t *)user_data;
 
+    (void)stream;
+
     if (server_stream != NULL && !server_stream->server->endpoint.quiet) {
-        printf("server stream=%u closed reason=%d\n", kcpmux_stream_id(stream), reason);
+        printf("server stream=%u closed reason=%d\n", server_stream->stream_id, reason);
         fflush(stdout);
     }
-
-    free(server_stream);
+    if (server_stream != NULL) {
+        server_stream->stream = NULL;
+        server_stream->closed = 1;
+    }
 }
 
 int
@@ -208,7 +278,12 @@ main(int argc, char **argv)
     for (;;) {
         if (demo_endpoint_poll(&server.endpoint, 100) != 0) {
             fprintf(stderr, "server event loop failed\n");
-            demo_endpoint_cleanup(&server.endpoint);
+            demo_server_cleanup(&server);
+            return 1;
+        }
+        if (demo_server_process_streams(&server) != 0) {
+            fprintf(stderr, "server failed to echo stream data\n");
+            demo_server_cleanup(&server);
             return 1;
         }
     }

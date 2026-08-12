@@ -50,6 +50,34 @@ struct TestAddr {
 // ============================================================================
 
 struct TestContext {
+    struct TimerEvent {
+        int64_t callback_time_ms;
+        uint64_t delay_ms;
+        int64_t deadline_ms;
+    };
+
+    struct TimerProbe {
+        std::vector<TimerEvent> history;
+        bool armed = false;
+        int64_t deadline_ms = 0;
+
+        void replace(int64_t now_ms, uint64_t delay_ms) {
+            deadline_ms = delay_ms > (uint64_t)INT64_MAX - (uint64_t)now_ms
+                ? INT64_MAX
+                : now_ms + (int64_t)delay_ms;
+            history.push_back({now_ms, delay_ms, deadline_ms});
+            armed = true;
+        }
+
+        void consume() { armed = false; }
+
+        void reset() {
+            history.clear();
+            armed = false;
+            deadline_ms = 0;
+        }
+    } timer_probe;
+
     std::vector<std::vector<uint8_t>> sent_packets;
     int64_t current_time_ms = 0;
     uint64_t timer_ms = 0;
@@ -60,6 +88,7 @@ struct TestContext {
 
     // Stream notification records
     int stream_notify_count = 0;
+    int stream_notify_result = 0;
 
     // State change records
     std::vector<std::pair<uint8_t, uint8_t>> conn_state_changes;
@@ -72,25 +101,31 @@ struct TestContext {
     // Close notification records
     int conn_close_count = 0;
     int conn_close_reason = 0;
+    uint8_t conn_close_state = KCPMUX_CONN_STATE_ERROR;
     int stream_close_count = 0;
     int stream_close_reason = 0;
+    uint8_t stream_close_state = KCPMUX_STREAM_STATE_ERROR;
 
     // Reset all members to initial state
     void reset() {
         sent_packets.clear();
         current_time_ms = 0;
         timer_ms = 0;
+        timer_probe.reset();
         conn_notify_count = 0;
         conn_notify_result = KCPMUX_ACK_RESULT_OK;
         stream_notify_count = 0;
+        stream_notify_result = 0;
         conn_state_changes.clear();
         stream_state_changes.clear();
         read_notify_count = 0;
         write_notify_count = 0;
         conn_close_count = 0;
         conn_close_reason = 0;
+        conn_close_state = KCPMUX_CONN_STATE_ERROR;
         stream_close_count = 0;
         stream_close_reason = 0;
+        stream_close_state = KCPMUX_STREAM_STATE_ERROR;
     }
 };
 
@@ -101,6 +136,7 @@ struct TestContext {
 static void test_set_timer(uint64_t wake_after_ms, void *user_data) {
     TestContext *ctx = (TestContext *)user_data;
     ctx->timer_ms = wake_after_ms;
+    ctx->timer_probe.replace(ctx->current_time_ms, wake_after_ms);
 }
 
 static int test_write_socket(const uint8_t *buf, unsigned size,
@@ -136,16 +172,17 @@ static void test_conn_state_changed(kcpmux_conn_t *conn, uint8_t old_state,
 }
 
 static void test_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data) {
-    (void)conn;     // Unused
     TestContext *ctx = (TestContext *)user_data;
     ctx->conn_close_count++;
     ctx->conn_close_reason = reason;
+    ctx->conn_close_state = conn->state;
 }
 
-static void test_stream_create_notify(kcpmux_stream_t *stream, void *user_data) {
+static int test_stream_create_notify(kcpmux_stream_t *stream, void *user_data) {
     (void)stream;       // Unused
     TestContext *ctx = (TestContext *)user_data;
     ctx->stream_notify_count++;
+    return ctx->stream_notify_result;
 }
 
 static void test_stream_state_changed(kcpmux_stream_t *stream, uint8_t old_state,
@@ -168,10 +205,10 @@ static void test_stream_write_notify(kcpmux_stream_t *stream, void *user_data) {
 }
 
 static void test_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data) {
-    (void)stream;   // Unused
     TestContext *ctx = (TestContext *)user_data;
     ctx->stream_close_count++;
     ctx->stream_close_reason = reason;
+    ctx->stream_close_state = stream->state;
 }
 
 // ============================================================================
@@ -292,75 +329,113 @@ static inline void write_u32(uint8_t *buf, uint32_t val) {
     buf[3] = (uint8_t)(val & 0xff);
 }
 
-// Build CONN_CONNECT message: type(1) + version(1) + ext_len(2) + ext(N)
+static inline uint32_t read_u24(const uint8_t *buf) {
+    return ((uint32_t)buf[0] << 16) |
+           ((uint32_t)buf[1] << 8) |
+           buf[2];
+}
+
+static inline uint32_t read_u32(const uint8_t *buf) {
+    return ((uint32_t)buf[0] << 24) |
+           ((uint32_t)buf[1] << 16) |
+           ((uint32_t)buf[2] << 8) |
+           buf[3];
+}
+
+static inline void write_common(uint8_t *buf, uint8_t type,
+                                uint32_t generation_id) {
+    buf[0] = type;
+    write_u24(buf + 1, generation_id);
+}
+
+// Build CONN_CONNECT message: common(4) + version(1) + ext_len(2) + ext(N)
 static inline std::vector<uint8_t> build_conn_connect(
-        const uint8_t *ext_data = nullptr, uint16_t ext_len = 0) {
-    unsigned msg_len = 4 + ext_len;
+        uint32_t generation_id = 1, const uint8_t *ext_data = nullptr,
+        uint16_t ext_len = 0) {
+    unsigned msg_len = 7 + ext_len;
     std::vector<uint8_t> buf(msg_len);
-    buf[0] = KCPMUX_MSG_CONN_CONNECT;
-    buf[1] = KCPMUX_VERSION;
-    write_u16(buf.data() + 2, ext_len);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CONNECT, generation_id);
+    buf[4] = KCPMUX_VERSION;
+    write_u16(buf.data() + 5, ext_len);
     if (ext_data && ext_len > 0) {
-        memcpy(buf.data() + 4, ext_data, ext_len);
+        memcpy(buf.data() + 7, ext_data, ext_len);
     }
     return buf;
 }
 
-// Build CONN_CONNECT_ACK message: type(1) + version(1) + result(1) + ext_len(2) + ext(N)
+// Build CONN_CONNECT_ACK: common(4) + version(1) + result(1) + ext_len(2) + ext(N)
 static inline std::vector<uint8_t> build_conn_connect_ack(
-        uint8_t result, const uint8_t *ext_data = nullptr, uint16_t ext_len = 0) {
-    unsigned msg_len = 5 + ext_len;
+        uint8_t result, uint32_t generation_id,
+        const uint8_t *ext_data = nullptr, uint16_t ext_len = 0) {
+    unsigned msg_len = 8 + ext_len;
     std::vector<uint8_t> buf(msg_len);
-    buf[0] = KCPMUX_MSG_CONN_CONNECT_ACK;
-    buf[1] = KCPMUX_VERSION;
-    buf[2] = result;
-    write_u16(buf.data() + 3, ext_len);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CONNECT_ACK, generation_id);
+    buf[4] = KCPMUX_VERSION;
+    buf[5] = result;
+    write_u16(buf.data() + 6, ext_len);
     if (ext_data && ext_len > 0) {
-        memcpy(buf.data() + 5, ext_data, ext_len);
+        memcpy(buf.data() + 8, ext_data, ext_len);
     }
     return buf;
 }
 
-// Build CONN_CLOSE message: type(1) + reason(1)
-static inline std::vector<uint8_t> build_conn_close(uint8_t reason) {
-    std::vector<uint8_t> buf(2);
-    buf[0] = KCPMUX_MSG_CONN_CLOSE;
-    buf[1] = reason;
+// Build CONN_CLOSE message: common(4) + reason(1)
+static inline std::vector<uint8_t> build_conn_close(
+        uint8_t reason, uint32_t generation_id = 1) {
+    std::vector<uint8_t> buf(5);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CLOSE, generation_id);
+    buf[4] = reason;
     return buf;
 }
 
-// Build CONN_CLOSE_ACK message: type(1) + reason(1)
-static inline std::vector<uint8_t> build_conn_close_ack(uint8_t reason) {
-    std::vector<uint8_t> buf(2);
-    buf[0] = KCPMUX_MSG_CONN_CLOSE_ACK;
-    buf[1] = reason;
+// Build CONN_CLOSE_ACK message: common(4) + reason(1)
+static inline std::vector<uint8_t> build_conn_close_ack(
+        uint8_t reason, uint32_t generation_id = 1) {
+    std::vector<uint8_t> buf(5);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CLOSE_ACK, generation_id);
+    buf[4] = reason;
     return buf;
 }
 
-// Build CONN_KEEPALIVE message: type(1) + time(4) + seq(4)
-static inline std::vector<uint8_t> build_conn_keepalive(uint32_t time, uint32_t seq) {
+// Build CONN_KEEPALIVE message: common(4) + time(4) + seq(4)
+static inline std::vector<uint8_t> build_conn_keepalive(
+        uint32_t time, uint32_t seq, uint32_t generation_id = 1) {
+    std::vector<uint8_t> buf(12);
+    write_common(buf.data(), KCPMUX_MSG_CONN_KEEPALIVE, generation_id);
+    write_u32(buf.data() + 4, time);
+    write_u32(buf.data() + 8, seq);
+    return buf;
+}
+
+// Build STREAM_CLOSE message: common(4) + stream_id(4) + reason(1)
+static inline std::vector<uint8_t> build_stream_close(
+        uint32_t stream_id, uint8_t reason, uint32_t generation_id = 1) {
     std::vector<uint8_t> buf(9);
-    buf[0] = KCPMUX_MSG_CONN_KEEPALIVE;
-    write_u32(buf.data() + 1, time);
-    write_u32(buf.data() + 5, seq);
+    write_common(buf.data(), KCPMUX_MSG_STREAM_CLOSE, generation_id);
+    write_u32(buf.data() + 4, stream_id);
+    buf[8] = reason;
     return buf;
 }
 
-// Build STREAM_CLOSE message: type(1) + stream_id(3) + reason(1)
-static inline std::vector<uint8_t> build_stream_close(uint32_t stream_id, uint8_t reason) {
-    std::vector<uint8_t> buf(5);
-    buf[0] = KCPMUX_MSG_STREAM_CLOSE;
-    write_u24(buf.data() + 1, stream_id);
-    buf[4] = reason;
+// Build STREAM_CLOSE_ACK message: common(4) + stream_id(4) + reason(1)
+static inline std::vector<uint8_t> build_stream_close_ack(
+        uint32_t stream_id, uint8_t reason, uint32_t generation_id = 1) {
+    std::vector<uint8_t> buf(9);
+    write_common(buf.data(), KCPMUX_MSG_STREAM_CLOSE_ACK, generation_id);
+    write_u32(buf.data() + 4, stream_id);
+    buf[8] = reason;
     return buf;
 }
 
-// Build STREAM_CLOSE_ACK message: type(1) + stream_id(3) + reason(1)
-static inline std::vector<uint8_t> build_stream_close_ack(uint32_t stream_id, uint8_t reason) {
-    std::vector<uint8_t> buf(5);
-    buf[0] = KCPMUX_MSG_STREAM_CLOSE_ACK;
-    write_u24(buf.data() + 1, stream_id);
-    buf[4] = reason;
+static inline std::vector<uint8_t> build_stream_payload(
+        uint32_t stream_id, const uint8_t *payload, unsigned payload_len,
+        uint32_t generation_id = 1) {
+    std::vector<uint8_t> buf(8 + payload_len);
+    write_common(buf.data(), KCPMUX_MSG_STREAM_PAYLOAD, generation_id);
+    write_u32(buf.data() + 4, stream_id);
+    if (payload && payload_len > 0) {
+        memcpy(buf.data() + 8, payload, payload_len);
+    }
     return buf;
 }
 

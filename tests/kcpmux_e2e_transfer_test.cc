@@ -2,15 +2,14 @@
 #include <numeric>
 #include <random>
 
-extern "C" {
-static uint32_t kcpmux_test_checksum(const uint8_t *data, size_t size, uint32_t seed) {
+static uint32_t kcpmux_test_checksum(const uint8_t *data, size_t size,
+                                     uint32_t seed) {
     uint32_t hash = seed ? seed : 2166136261u;
     for (size_t i = 0; i < size; ++i) {
         hash ^= data[i];
         hash *= 16777619u;
     }
     return hash;
-}
 }
 
 using namespace kcpmux_e2e;
@@ -31,7 +30,9 @@ protected:
         // Create stream
         ctx.client.create_stream();
         ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
-        stream_id = kcpmux_stream_id(ctx.client.stream);
+        kcpmux_stream_t *stream = ctx.client.get_primary_stream();
+        ASSERT_NE(stream, nullptr);
+        stream_id = kcpmux_stream_id(stream);
 
         // Bootstrap payload to create server-side stream.
         uint8_t bootstrap = 0x7f;
@@ -66,23 +67,21 @@ TEST_F(kcpmux_e2e_transfer, transfer_concurrent_streams) {
     const int NUM_STREAMS = 8;
 
     // Create additional streams
-    std::vector<kcpmux_stream_t *> client_streams;
     std::vector<uint32_t> stream_ids;
     std::vector<std::vector<uint8_t>> send_data_list;
     std::vector<uint32_t> send_crcs;
 
     // First stream already created in SetUp
-    client_streams.push_back(ctx.client.stream);
     stream_ids.push_back(stream_id);
 
     // Create more streams
     for (int i = 1; i < NUM_STREAMS; i++) {
-        ctx.client.stream = nullptr;
-        ctx.client.stream_state.store(-1);
+        ctx.client.reset_primary_stream();
         ctx.client.create_stream();
         ASSERT_TRUE(ctx.wait_stream_state(ctx.client, KCPMUX_STREAM_STATE_OPEN, 3000));
-        client_streams.push_back(ctx.client.stream);
-        stream_ids.push_back(kcpmux_stream_id(ctx.client.stream));
+        kcpmux_stream_t *stream = ctx.client.get_primary_stream();
+        ASSERT_NE(stream, nullptr);
+        stream_ids.push_back(kcpmux_stream_id(stream));
     }
 
     // Generate unique data for each stream
@@ -95,38 +94,13 @@ TEST_F(kcpmux_e2e_transfer, transfer_concurrent_streams) {
         send_crcs.push_back(kcpmux_test_checksum(data.data(), data.size(), 0));
     }
 
-    // Send data on all streams concurrently with proper write block handling
-    const size_t CHUNK_SIZE = 4096;
-    for (size_t offset = 0; offset < DATA_SIZE; offset += CHUNK_SIZE) {
-        for (int i = 0; i < NUM_STREAMS; i++) {
-            size_t chunk_len = std::min(CHUNK_SIZE, DATA_SIZE - offset);
-            kcpmux_stream_t *stream = client_streams[i];
-            std::vector<uint8_t> chunk_data(send_data_list[i].data() + offset,
-                                            send_data_list[i].data() + offset + chunk_len);
-            ctx.client.queue_action([stream, chunk_data]() {
-                // Retry send if write blocked (returns 0)
-                size_t sent = 0;
-                while (sent < chunk_data.size()) {
-                    int ret = kcpmux_stream_send(stream, chunk_data.data() + sent,
-                                                (unsigned)(chunk_data.size() - sent), 1);
-                    if (ret > 0) {
-                        sent += ret;
-                    } else if (ret == 0) {
-                        // Write blocked, break and let write_notify handle retry
-                        // For simplicity in this test, we just break - the data may be lost
-                        // In production, proper buffering should be used
-                        break;
-                    } else {
-                        // Error
-                        break;
-                    }
-                }
-            });
-        }
+    // Queue all streams before waiting so their KCP sessions progress together.
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        ctx.client.send_data_on_stream_with_retry(
+            stream_ids[i], send_data_list[i].data(), send_data_list[i].size());
     }
 
-    // Give sender time to process all data
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT_TRUE(ctx.wait_pending_send_complete(ctx.client, 15000));
 
     // Wait for all streams to receive data
     for (int i = 0; i < NUM_STREAMS; i++) {

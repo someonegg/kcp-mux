@@ -141,6 +141,41 @@ TEST_F(kcpmux_data, send_recv_small_data) {
     EXPECT_EQ(std::string((char*)recv_buf, ret), send_data);
 }
 
+TEST_F(kcpmux_data, recv_small_buffer_can_retry_with_peeked_size) {
+    establish_connection();
+    create_streams();
+
+    std::string send_data = "message larger than the first receive buffer";
+    ASSERT_EQ(kcpmux_stream_send(
+                  client_stream,
+                  reinterpret_cast<const uint8_t *>(send_data.data()),
+                  send_data.size(), 1),
+              static_cast<int>(send_data.size()));
+    pump_kcp(ctx);
+
+    kcpmux_stream_stats_t before{};
+    kcpmux_stream_get_stats(server_stream, &before);
+    int notify_count = ctx.server_ctx.read_notify_count;
+    uint8_t small_buffer[4]{};
+    EXPECT_EQ(kcpmux_stream_peek_size(server_stream),
+              static_cast<int>(send_data.size()));
+    EXPECT_EQ(kcpmux_stream_recv(
+                  server_stream, small_buffer, sizeof(small_buffer)),
+              KCPMUX_ERR_BUFFER_TOO_SMALL);
+
+    kcpmux_stream_stats_t after_small{};
+    kcpmux_stream_get_stats(server_stream, &after_small);
+    EXPECT_EQ(after_small.read_block_count, before.read_block_count);
+    EXPECT_EQ(ctx.server_ctx.read_notify_count, notify_count);
+    EXPECT_EQ(kcpmux_stream_peek_size(server_stream),
+              static_cast<int>(send_data.size()));
+
+    std::vector<uint8_t> buffer(send_data.size());
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, buffer.data(), buffer.size()),
+              static_cast<int>(send_data.size()));
+    EXPECT_EQ(std::string(buffer.begin(), buffer.end()), send_data);
+}
+
 TEST_F(kcpmux_data, send_recv_bidirectional) {
     establish_connection();
     create_streams();
