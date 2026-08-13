@@ -36,6 +36,10 @@ int kcpmux_engine_input(
     unsigned size,
     const kcpmux_addr_t *peer_addr);
 
+// Requests immediate KCP updates for all streams with operations accumulated
+// below their batch thresholds. Call once after an application input batch.
+void kcpmux_engine_finish_batch(kcpmux_engine_t *engine);
+
 // Dispatches work due when the replaceable one-shot timer fires.
 void kcpmux_engine_update(kcpmux_engine_t *engine);
 
@@ -94,6 +98,8 @@ kcpmux_stream_t *kcpmux_stream_create(
 // Starts a terminal close. Returns 0 on success or a negative error code.
 int kcpmux_stream_close(kcpmux_stream_t *stream);
 
+// Replaces the stream configuration. Runtime changes on an active stream are
+// not recommended; configure the stream when it is created whenever possible.
 void kcpmux_stream_set_config(kcpmux_stream_t *stream, const kcpmux_stream_config_t *config);
 
 void kcpmux_stream_set_callbacks(
@@ -105,6 +111,10 @@ void kcpmux_stream_set_callbacks(
 // A nonzero flush requests immediate output. Returns bytes sent, 0 when write
 // blocked, or a negative error code.
 int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int flush);
+
+// Requests an immediate KCP update for operations accumulated below the stream
+// batch threshold. Does nothing when the stream has no pending operations.
+void kcpmux_stream_finish_batch(kcpmux_stream_t *stream);
 
 // Returns the next complete message size, 0 if unavailable, or a negative error.
 int kcpmux_stream_peek_size(kcpmux_stream_t *stream);

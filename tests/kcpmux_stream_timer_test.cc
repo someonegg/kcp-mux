@@ -815,6 +815,179 @@ TEST_F(kcpmux_stream_timer, send_flush_modes_have_distinct_scheduling) {
     EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
 }
 
+TEST_F(kcpmux_stream_timer, send_and_input_share_batch_threshold) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 3;
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_stream_set_config(stream, &config);
+    uint8_t byte = 0x42;
+
+    context.check_deadline_ms = 5000;
+    kcpmux_stream_refresh_timer(stream, context.now_ms);
+    ASSERT_EQ(stream->timer_node.deadline_ms, 5000);
+
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    EXPECT_EQ(stream->pending_count, 1u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+
+    ASSERT_EQ(kcpmux_stream_handle_payload(stream, &byte, 1, context.now_ms), 0);
+    EXPECT_EQ(stream->pending_count, 2u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    EXPECT_EQ(stream->pending_count, 3u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, context.now_ms);
+    EXPECT_EQ(context.last_timer_ms, 0u);
+
+    ASSERT_EQ(kcpmux_stream_handle_payload(stream, &byte, 1, context.now_ms), 0);
+    EXPECT_EQ(stream->pending_count, 3u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, context.now_ms);
+}
+
+TEST_F(kcpmux_stream_timer, finish_batch_schedules_pending_work) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 4;
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_stream_set_config(stream, &config);
+    uint8_t byte = 0x42;
+
+    context.check_deadline_ms = 5000;
+    kcpmux_stream_refresh_timer(stream, context.now_ms);
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    ASSERT_EQ(stream->timer_node.deadline_ms, 5000);
+
+    kcpmux_stream_finish_batch(stream);
+    EXPECT_EQ(stream->pending_count, 4u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, context.now_ms);
+    EXPECT_EQ(context.last_timer_ms, 0u);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(stream->pending_count, 0u);
+    EXPECT_EQ(context.total_update_calls, 1);
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+}
+
+TEST_F(kcpmux_stream_timer, engine_finish_batch_schedules_each_pending_stream_once) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 4;
+    kcpmux_stream_t *first = NewStream(1);
+    kcpmux_stream_t *second = NewStream(3);
+    kcpmux_stream_t *idle = NewStream(5);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    ASSERT_NE(idle, nullptr);
+    kcpmux_stream_set_config(first, &config);
+    kcpmux_stream_set_config(second, &config);
+    kcpmux_stream_set_config(idle, &config);
+    uint8_t byte = 0x42;
+
+    context.check_deadline_ms = 5000;
+    kcpmux_stream_refresh_timer(first, context.now_ms);
+    kcpmux_stream_refresh_timer(second, context.now_ms);
+    kcpmux_stream_refresh_timer(idle, context.now_ms);
+    ASSERT_EQ(kcpmux_stream_handle_payload(first, &byte, 1, context.now_ms), 0);
+    ASSERT_EQ(kcpmux_stream_handle_payload(first, &byte, 1, context.now_ms), 0);
+    ASSERT_EQ(kcpmux_stream_handle_payload(second, &byte, 1, context.now_ms), 0);
+    ASSERT_FALSE(list_empty(&engine->pending_batch_streams));
+
+    kcpmux_engine_finish_batch(engine);
+
+    EXPECT_TRUE(list_empty(&engine->pending_batch_streams));
+    EXPECT_EQ(first->pending_count, 4u);
+    EXPECT_EQ(second->pending_count, 4u);
+    EXPECT_EQ(idle->pending_count, 0u);
+    EXPECT_EQ(first->timer_node.deadline_ms, context.now_ms);
+    EXPECT_EQ(second->timer_node.deadline_ms, context.now_ms);
+    EXPECT_EQ(idle->timer_node.deadline_ms, 5000);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(static_cast<FakeKcp *>(first->kcp)->update_calls, 1);
+    EXPECT_EQ(static_cast<FakeKcp *>(second->kcp)->update_calls, 1);
+    EXPECT_EQ(static_cast<FakeKcp *>(idle->kcp)->update_calls, 0);
+}
+
+TEST_F(kcpmux_stream_timer, engine_finish_batch_handles_non_readable_input_streams) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 4;
+    engine->default_stream_config = config;
+    context.check_deadline_ms = 5000;
+    context.peek_result = 0;
+    const uint8_t kcp_payload[] = {0xaa};
+    auto first = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto second = build_stream_payload(4, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, first.data(), first.size(), &context.peer_addr), 0);
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, second.data(), second.size(), &context.peer_addr), 0);
+    EXPECT_EQ(context.stream_read_calls, 0);
+    ASSERT_NE(kcpmux_conn_get_stream_by_id(conn, 2), nullptr);
+    ASSERT_NE(kcpmux_conn_get_stream_by_id(conn, 4), nullptr);
+
+    kcpmux_engine_finish_batch(engine);
+
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 2)->timer_node.deadline_ms, context.now_ms);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 4)->timer_node.deadline_ms, context.now_ms);
+    EXPECT_TRUE(list_empty(&engine->pending_batch_streams));
+}
+
+TEST_F(kcpmux_stream_timer, pending_batch_membership_is_cleared_by_flush_config_and_close) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 4;
+    uint8_t byte = 0x42;
+
+    kcpmux_stream_t *flushed = NewStream(1);
+    ASSERT_NE(flushed, nullptr);
+    kcpmux_stream_set_config(flushed, &config);
+    ASSERT_EQ(kcpmux_stream_send(flushed, &byte, 1, 0), 1);
+    ASSERT_EQ(kcpmux_stream_send(flushed, &byte, 1, 1), 1);
+    EXPECT_TRUE(list_empty(&flushed->pending_batch_node));
+
+    kcpmux_stream_t *reconfigured = NewStream(3);
+    ASSERT_NE(reconfigured, nullptr);
+    kcpmux_stream_set_config(reconfigured, &config);
+    ASSERT_EQ(kcpmux_stream_send(reconfigured, &byte, 1, 0), 1);
+    kcpmux_stream_set_config(reconfigured, &config);
+    EXPECT_TRUE(list_empty(&reconfigured->pending_batch_node));
+
+    kcpmux_stream_t *closed = NewStream(5);
+    ASSERT_NE(closed, nullptr);
+    kcpmux_stream_set_config(closed, &config);
+    ASSERT_EQ(kcpmux_stream_send(closed, &byte, 1, 0), 1);
+    kcpmux_stream_close_internal(closed, KCPMUX_CLOSE_REASON_NORMAL);
+
+    kcpmux_engine_finish_batch(engine);
+    EXPECT_TRUE(list_empty(&engine->pending_batch_streams));
+}
+
+TEST_F(kcpmux_stream_timer, flush_clears_accumulated_batch) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 4;
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_stream_set_config(stream, &config);
+    uint8_t byte = 0x42;
+
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    ASSERT_EQ(stream->pending_count, 1u);
+    context.check_deadline_ms = 5000;
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 1), 1);
+
+    EXPECT_EQ(stream->pending_count, 0u);
+    EXPECT_EQ(context.total_update_calls, 1);
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+    kcpmux_stream_finish_batch(stream);
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+}
+
 TEST_F(kcpmux_stream_timer, input_error_still_schedules_immediate_update) {
     kcpmux_stream_t *stream = NewStream(1);
     ASSERT_NE(stream, nullptr);
@@ -826,6 +999,26 @@ TEST_F(kcpmux_stream_timer, input_error_still_schedules_immediate_update) {
     EXPECT_LT(ret, 0);
     EXPECT_EQ(stream->timer_node.deadline_ms, context.now_ms);
     EXPECT_EQ(context.last_timer_ms, 0u);
+}
+
+TEST_F(kcpmux_stream_timer, input_error_counts_toward_batch_threshold) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = 2;
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_stream_set_config(stream, &config);
+    uint8_t byte = 0x42;
+    context.input_result = -7;
+    context.check_deadline_ms = 5000;
+    kcpmux_stream_refresh_timer(stream, context.now_ms);
+
+    EXPECT_LT(kcpmux_stream_handle_payload(stream, &byte, 1, context.now_ms), 0);
+    EXPECT_EQ(stream->pending_count, 1u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+    EXPECT_LT(kcpmux_stream_handle_payload(stream, &byte, 1, context.now_ms), 0);
+    EXPECT_EQ(stream->pending_count, 2u);
+    EXPECT_EQ(stream->timer_node.deadline_ms, context.now_ms);
 }
 
 }  // namespace

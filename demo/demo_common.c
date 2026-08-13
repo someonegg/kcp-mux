@@ -121,6 +121,15 @@ static int demo_set_socket_buffers(int fd)
     return 0;
 }
 
+static int demo_set_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int demo_udp_resolve_ipv4(const char *host, unsigned short port, struct sockaddr_in *out)
 {
     if (host == NULL || out == NULL) {
@@ -150,6 +159,7 @@ int demo_udp_bind(int *fd, const char *host, unsigned short port)
 
     (void)setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     if (demo_set_socket_buffers(sock) != 0
+        || demo_set_nonblocking(sock) != 0
         || bind(sock, (const struct sockaddr *)&addr, sizeof(addr)) != 0)
     {
         close(sock);
@@ -173,7 +183,7 @@ int demo_udp_open_client(int *fd)
         return -1;
     }
 
-    if (demo_set_socket_buffers(sock) != 0) {
+    if (demo_set_socket_buffers(sock) != 0 || demo_set_nonblocking(sock) != 0) {
         close(sock);
         return -1;
     }
@@ -262,22 +272,35 @@ int demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
     }
 
     if (ret > 0 && FD_ISSET(endpoint->fd, &readfds)) {
-        struct sockaddr_in peer;
-        socklen_t peer_len = (socklen_t)sizeof(peer);
-        ssize_t nread = recvfrom(
-            endpoint->fd,
-            packet,
-            sizeof(packet),
-            0,
-            (struct sockaddr *)&peer,
-            &peer_len);
-        if (nread > 0) {
-            uint8_t addr_buf[6];
-            kcpmux_addr_t addr;
-            if (demo_sockaddr_to_kcpmux_addr(&peer, &addr, addr_buf) == 0) {
-                (void)kcpmux_engine_input(endpoint->engine, packet, (unsigned)nread, &addr);
+        for (;;) {
+            struct sockaddr_in peer;
+            socklen_t peer_len = (socklen_t)sizeof(peer);
+            ssize_t nread = recvfrom(
+                endpoint->fd,
+                packet,
+                sizeof(packet),
+                0,
+                (struct sockaddr *)&peer,
+                &peer_len);
+            if (nread >= 0) {
+                if (nread > 0) {
+                    uint8_t addr_buf[6];
+                    kcpmux_addr_t addr;
+                    if (demo_sockaddr_to_kcpmux_addr(&peer, &addr, addr_buf) == 0) {
+                        (void)kcpmux_engine_input(endpoint->engine, packet, (unsigned)nread, &addr);
+                    }
+                }
+                continue;
             }
+            if (nread < 0 && errno == EINTR) {
+                continue;
+            }
+            if (nread < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                return -1;
+            }
+            break;
         }
+        kcpmux_engine_finish_batch(endpoint->engine);
     }
 
     now = demo_monotonic_time_ms();

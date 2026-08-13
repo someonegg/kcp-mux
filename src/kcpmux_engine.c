@@ -1,6 +1,7 @@
 #include "kcpmux.h"
 #include "kcpmux_engine.h"
 #include "kcpmux_conn.h"
+#include "kcpmux_stream.h"
 #include "kcpmux_protocol.h"
 #include "kcpmux_hash.h"
 
@@ -73,6 +74,7 @@ void kcpmux_stream_config_init(kcpmux_stream_config_t *config)
     config->kcp_mss               = KCPMUX_DEFAULT_KCP_MSS;
     config->send_pause_threshold  = KCPMUX_DEFAULT_SEND_PAUSE_THRESHOLD;
     config->send_resume_threshold = KCPMUX_DEFAULT_SEND_RESUME_THRESHOLD;
+    config->batch_threshold       = KCPMUX_DEFAULT_BATCH_THRESHOLD;
 }
 
 // ============================================================================
@@ -94,6 +96,7 @@ kcpmux_engine_t *kcpmux_engine_create(
 
     memset(engine, 0, sizeof(*engine));
     INIT_LIST_HEAD(&engine->pending_release_list);
+    INIT_LIST_HEAD(&engine->pending_batch_streams);
     if (kcpmux_timer_manager_init(&engine->timer_manager) != KCPMUX_ERR_OK) {
         free(engine);
         return NULL;
@@ -234,6 +237,25 @@ int kcpmux_engine_input(
     int ret = kcpmux_protocol_input(engine, buf, size, peer_addr, kcpmux_engine_now(engine));
     kcpmux_engine_operation_leave(engine);
     return ret;
+}
+
+void kcpmux_engine_finish_batch(kcpmux_engine_t *engine)
+{
+    int64_t now;
+
+    if (!engine) return;
+
+    now = kcpmux_engine_now(engine);
+    kcpmux_engine_operation_enter(engine);
+    while (!list_empty(&engine->pending_batch_streams)) {
+        kcpmux_stream_t *stream = list_first_entry(
+            &engine->pending_batch_streams,
+            kcpmux_stream_t,
+            pending_batch_node);
+        list_del_init(&stream->pending_batch_node);
+        kcpmux_stream_finish_batch_at(stream, now);
+    }
+    kcpmux_engine_operation_leave(engine);
 }
 
 // ============================================================================

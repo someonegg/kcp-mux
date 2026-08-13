@@ -43,6 +43,9 @@ struct kcpmux_engine_s {
 
     uint8_t                   destroying;
 
+    // Streams with KCP operations waiting for an application batch boundary.
+    list_head                 pending_batch_streams;
+
     // Defer physical destruction until the current internal operation ends.
     uint32_t                  operation_depth;
     list_head                 pending_release_list;

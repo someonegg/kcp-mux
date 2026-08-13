@@ -10,7 +10,8 @@ The demo shows the minimum integration path:
 - send UDP packets from the `write_socket` callback
 - defer read/write API calls out of notification callbacks into the event loop
 - open multiple streams on one connection
-- echo data back on each stream
+- send and echo multiple message-boundary-preserving payloads on each stream
+- batch stream operations with `flush=0` and `kcpmux_stream_finish_batch()`
 
 ## Build
 
@@ -24,20 +25,20 @@ cmake --build build --target demo_server demo_client
 Start the server:
 
 ```sh
-./build/demo/demo_server --port 8443
+./build/demo/demo_server --port 8443 --batch-threshold 4
 ```
 
 Run the client from another terminal:
 
 ```sh
 ./build/demo/demo_client --host 127.0.0.1 --port 8443 \
-    --streams 3 --message hello
+    --streams 3 --messages 10 --batch-threshold 4 --message hello
 ```
 
 Expected client output ends with:
 
 ```text
-OK streams=3 bytes=66
+OK streams=3 messages=10 bytes=873
 ```
 
 ## Options
@@ -47,6 +48,7 @@ Server:
 ```text
 --host ADDR
 --port PORT
+--batch-threshold N (default: 4; 1 disables batching)
 --quiet
 ```
 
@@ -56,7 +58,21 @@ Client:
 --host ADDR
 --port PORT
 --streams N
+--messages N (default: 10, maximum: 128)
+--batch-threshold N (default: 4; 1 disables batching)
 --message TEXT
 --timeout-ms MS
 --quiet
 ```
+
+Each payload includes its logical stream number, message number, and the text supplied by
+`--message`. Because every payload is smaller than the default KCP MSS, each `send` is
+delivered as one distinct KCP message and the client validates every echo by message boundary
+and sequence number.
+
+Both sides call `kcpmux_stream_send(..., flush=0)` for each message. Reaching
+`batch_threshold` schedules an update automatically. After sending a group on a known stream,
+`kcpmux_stream_finish_batch()` immediately submits any tail below the threshold. After feeding
+a group of UDP packets to the engine, `kcpmux_engine_finish_batch()` submits tails for every
+affected stream, including streams that did not become readable. Both functions are safe no-ops
+when there is no pending work.

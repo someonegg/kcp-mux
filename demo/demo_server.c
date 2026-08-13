@@ -1,5 +1,6 @@
 #include "demo_common.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +9,7 @@ typedef struct demo_server_s {
     demo_endpoint_t endpoint;
     const char *host;
     unsigned short port;
+    unsigned batch_threshold;
     struct demo_server_stream_s *streams;
 } demo_server_t;
 
@@ -38,9 +40,9 @@ static void demo_server_usage(const char *prog)
 {
     fprintf(
         stderr,
-        "Usage: %s [--host ADDR] [--port PORT] [--quiet]\n"
+        "Usage: %s [--host ADDR] [--port PORT] [--batch-threshold N] [--quiet]\n"
         "\n"
-        "Defaults: --host %s --port %d\n",
+        "Defaults: --host %s --port %d --batch-threshold 4\n",
         prog,
         DEMO_DEFAULT_HOST,
         DEMO_DEFAULT_PORT);
@@ -50,6 +52,7 @@ static int demo_server_parse_args(int argc, char **argv, demo_server_t *server)
 {
     server->host = DEMO_DEFAULT_HOST;
     server->port = DEMO_DEFAULT_PORT;
+    server->batch_threshold = 4;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) {
@@ -63,6 +66,13 @@ static int demo_server_parse_args(int argc, char **argv, demo_server_t *server)
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             if (demo_parse_port(argv[++i], &server->port) != 0) {
                 fprintf(stderr, "invalid --port value\n");
+                return -1;
+            }
+            continue;
+        }
+        if (strcmp(argv[i], "--batch-threshold") == 0 && i + 1 < argc) {
+            if (demo_parse_uint(argv[++i], &server->batch_threshold, 1, UINT_MAX) != 0) {
+                fprintf(stderr, "invalid --batch-threshold value\n");
                 return -1;
             }
             continue;
@@ -112,6 +122,7 @@ static int demo_server_stream_create_notify(kcpmux_stream_t *stream, void *user_
     demo_server_t *server = (demo_server_t *)user_data;
     demo_server_stream_t *server_stream;
     kcpmux_stream_callbacks_t callbacks;
+    kcpmux_stream_config_t config;
 
     server_stream = (demo_server_stream_t *)calloc(1, sizeof(*server_stream));
     if (server_stream == NULL) {
@@ -127,6 +138,9 @@ static int demo_server_stream_create_notify(kcpmux_stream_t *stream, void *user_
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.stream_read_notify = demo_server_stream_read_notify;
     callbacks.stream_close_notify = demo_server_stream_close_notify;
+    kcpmux_stream_config_init(&config);
+    config.batch_threshold = server->batch_threshold;
+    kcpmux_stream_set_config(stream, &config);
     kcpmux_stream_set_callbacks(stream, &callbacks, server_stream);
 
     if (!server->endpoint.quiet) {
@@ -205,7 +219,7 @@ static int demo_server_process_streams(demo_server_t *server)
             if (received <= 0 || server_stream->closed) {
                 return -1;
             }
-            sent = kcpmux_stream_send(server_stream->stream, buf, (unsigned)received, 1);
+            sent = kcpmux_stream_send(server_stream->stream, buf, (unsigned)received, 0);
             if (sent != received || server_stream->closed) {
                 return -1;
             }
@@ -219,6 +233,7 @@ static int demo_server_process_streams(demo_server_t *server)
                 fflush(stdout);
             }
         }
+        kcpmux_stream_finish_batch(server_stream->stream);
         link = &server_stream->next;
     }
 

@@ -240,6 +240,7 @@ TEST(kcpmux_lifecycle, engine_config_default_values) {
 
     EXPECT_EQ(stream_config.ctrl_timeout_ms, KCPMUX_DEFAULT_SCONTROL_TIMEOUT_MS);
     EXPECT_EQ(stream_config.close_retries, KCPMUX_DEFAULT_SCLOSE_RETRIES);
+    EXPECT_EQ(stream_config.batch_threshold, KCPMUX_DEFAULT_BATCH_THRESHOLD);
 }
 
 // ============================================================================

@@ -18,12 +18,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$SERVER" --host 127.0.0.1 --port "$PORT" --quiet >"$SERVER_LOG" 2>&1 &
+"$SERVER" --host 127.0.0.1 --port "$PORT" --batch-threshold 4 --quiet >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 
 sleep 0.2
 
-if ! "$CLIENT" --host 127.0.0.1 --port "$PORT" --streams 3 --message smoke --timeout-ms 5000 \
+if ! "$CLIENT" --host 127.0.0.1 --port "$PORT" --streams 3 --messages 10 \
+    --batch-threshold 4 --message smoke --timeout-ms 5000 \
     >"$CLIENT_LOG" 2>&1
 then
     echo "demo client failed" >&2
@@ -34,7 +35,7 @@ then
     exit 1
 fi
 
-if ! grep "OK streams=3" "$CLIENT_LOG" >/dev/null 2>&1; then
+if ! grep "OK streams=3 messages=10" "$CLIENT_LOG" >/dev/null 2>&1; then
     echo "demo client did not report success" >&2
     cat "$CLIENT_LOG" >&2 || true
     exit 1

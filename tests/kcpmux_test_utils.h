@@ -353,6 +353,94 @@ struct DualEngineContext {
     }
 };
 
+// Run both engines around one bidirectional packet-delivery pass.
+static inline void pump_kcp(DualEngineContext &ctx)
+{
+    kcpmux_engine_update(ctx.client_engine);
+    kcpmux_engine_update(ctx.server_engine);
+    ctx.deliver_all();
+    kcpmux_engine_update(ctx.client_engine);
+    kcpmux_engine_update(ctx.server_engine);
+}
+
+struct ConnectedPair {
+    kcpmux_conn_t *client = nullptr;
+    kcpmux_conn_t *server = nullptr;
+};
+
+struct StreamPair {
+    kcpmux_stream_t *client = nullptr;
+    kcpmux_stream_t *server = nullptr;
+    uint32_t stream_id = 0;
+};
+
+class DualEngineTest : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        ctx.setup();
+    }
+
+    void TearDown() override
+    {
+        ctx.teardown();
+    }
+
+    ConnectedPair connect_pair(const kcpmux_conn_config_t *config = nullptr)
+    {
+        ConnectedPair pair;
+        kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
+        pair.client = kcpmux_conn_connect(
+            ctx.client_engine,
+            ctx.server_addr.get(),
+            config,
+            nullptr,
+            &client_callbacks,
+            &ctx.client_ctx);
+        if (!pair.client) return pair;
+
+        ctx.deliver_all();
+        pair.server = kcpmux_engine_get_conn_by_addr(
+            ctx.server_engine,
+            ctx.client_addr.get());
+        if (!pair.server) return pair;
+
+        kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
+        kcpmux_conn_set_callbacks(pair.server, &server_callbacks, &ctx.server_ctx);
+        return pair;
+    }
+
+    StreamPair open_stream_pair(
+        const ConnectedPair &connection,
+        const kcpmux_stream_config_t *config = nullptr,
+        uint8_t bootstrap = 0x7f)
+    {
+        StreamPair pair;
+        if (!connection.client || !connection.server) return pair;
+
+        kcpmux_stream_callbacks_t client_callbacks = create_stream_callbacks(&ctx.client_ctx);
+        pair.client = kcpmux_stream_create(
+            connection.client,
+            config,
+            &client_callbacks,
+            &ctx.client_ctx);
+        if (!pair.client) return pair;
+
+        pair.stream_id = kcpmux_stream_id(pair.client);
+        if (kcpmux_stream_send(pair.client, &bootstrap, 1, 1) != 1) return pair;
+        pump_kcp(ctx);
+
+        pair.server = kcpmux_conn_get_stream_by_id(connection.server, pair.stream_id);
+        if (!pair.server) return pair;
+        kcpmux_stream_callbacks_t server_callbacks = create_stream_callbacks(&ctx.server_ctx);
+        kcpmux_stream_set_callbacks(pair.server, &server_callbacks, &ctx.server_ctx);
+        pump_kcp(ctx);
+        return pair;
+    }
+
+    DualEngineContext ctx;
+};
+
 // ============================================================================
 // Protocol message builders
 // ============================================================================

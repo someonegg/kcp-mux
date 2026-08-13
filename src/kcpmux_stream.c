@@ -9,6 +9,39 @@
 
 static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms);
 
+static void kcpmux_stream_clear_pending(kcpmux_stream_t *stream)
+{
+    stream->pending_count = 0;
+    if (!list_empty(&stream->pending_batch_node)) {
+        list_del_init(&stream->pending_batch_node);
+    }
+}
+
+static void kcpmux_stream_accumulate_update(kcpmux_stream_t *stream, int64_t now_ms)
+{
+    uint32_t threshold = stream->config.batch_threshold;
+
+    if (threshold <= 1) {
+        (void)kcpmux_engine_schedule_timer_node(
+            stream->conn->engine, &stream->timer_node, now_ms, now_ms);
+        return;
+    }
+    if (stream->pending_count >= threshold) {
+        return;
+    }
+    if (stream->pending_count == 0) {
+        list_add_tail(
+            &stream->pending_batch_node,
+            &stream->conn->engine->pending_batch_streams);
+    }
+    stream->pending_count++;
+    if (stream->pending_count == threshold) {
+        list_del_init(&stream->pending_batch_node);
+        (void)kcpmux_engine_schedule_timer_node(
+            stream->conn->engine, &stream->timer_node, now_ms, now_ms);
+    }
+}
+
 static void kcpmux_stream_free(kcpmux_pending_release_t *item)
 {
     kcpmux_stream_t *stream = list_entry(item, kcpmux_stream_t, pending_release);
@@ -60,6 +93,7 @@ kcpmux_stream_t *kcpmux_stream_new(
     memset(stream, 0, sizeof(*stream));
     INIT_LIST_HEAD(&stream->hash_node);
     INIT_LIST_HEAD(&stream->pending_release.node);
+    INIT_LIST_HEAD(&stream->pending_batch_node);
 
     stream->stream_id = stream_id;
     stream->is_initiator = is_initiator;
@@ -119,6 +153,7 @@ void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason)
     }
 
     kcpmux_engine_t *engine = stream->conn->engine;
+    kcpmux_stream_clear_pending(stream);
     kcpmux_engine_unregister_timer_node(engine, &stream->timer_node);
     kcpmux_conn_remove_stream(stream->conn, stream);
 
@@ -245,6 +280,7 @@ void kcpmux_stream_set_config(kcpmux_stream_t *stream, const kcpmux_stream_confi
 
     // Directly replace the entire config structure
     stream->config = *config;
+    kcpmux_stream_clear_pending(stream);
     kcpmux_stream_refresh_timer(stream, kcpmux_engine_now(stream->conn->engine));
 }
 
@@ -329,18 +365,49 @@ int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned siz
         return 0;
     }
 
-    // A send mutates opaque KCP timing. Deferred flush must run on the next
-    // event-loop turn; synchronous flush can trust check() after update().
+    // A send mutates opaque KCP timing. Batched sends keep the current KCP
+    // deadline until the threshold or finish boundary requests an update;
+    // synchronous flush can trust check() after update().
     if (flush) {
+        kcpmux_stream_clear_pending(stream);
         ops->update(stream->kcp, now);
         int64_t deadline_ms = ops->check(stream->kcp, now);
         (void)kcpmux_engine_schedule_timer_node(engine, &stream->timer_node, deadline_ms, now);
     } else {
-        (void)kcpmux_engine_schedule_timer_node(engine, &stream->timer_node, now, now);
+        kcpmux_stream_accumulate_update(stream, now);
     }
 
     kcpmux_engine_operation_leave(engine);
     return (int)total_sent;
+}
+
+void kcpmux_stream_finish_batch(kcpmux_stream_t *stream)
+{
+    if (!stream) return;
+    kcpmux_stream_finish_batch_at(stream, kcpmux_engine_now(stream->conn->engine));
+}
+
+void kcpmux_stream_finish_batch_at(kcpmux_stream_t *stream, int64_t now)
+{
+    if (!stream || stream->internal_closed || stream->pending_count == 0) {
+        return;
+    }
+    if (stream->state != KCPMUX_STREAM_STATE_OPEN ||
+        stream->conn->state != KCPMUX_CONN_STATE_CONNECTED) {
+        return;
+    }
+    if (stream->config.batch_threshold > 1 &&
+        stream->pending_count >= stream->config.batch_threshold) {
+        return;
+    }
+    if (!list_empty(&stream->pending_batch_node)) {
+        list_del_init(&stream->pending_batch_node);
+    }
+    stream->pending_count = stream->config.batch_threshold > 1
+        ? stream->config.batch_threshold
+        : 0;
+    (void)kcpmux_engine_schedule_timer_node(
+        stream->conn->engine, &stream->timer_node, now, now);
 }
 
 int kcpmux_stream_peek_size(kcpmux_stream_t *stream)
@@ -460,6 +527,7 @@ void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now)
             kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
 
             // Update KCP
+            kcpmux_stream_clear_pending(stream);
             ops->update(stream->kcp, now);
 
             // Check flow control recovery (edge-triggered: blocked -> writable)
@@ -585,11 +653,7 @@ int kcpmux_stream_handle_payload(
     ops->current_update(stream->kcp, recv_time_ms);
     int ret = ops->input(stream->kcp, (const char *)buf, (long)size);
     // input() may partially mutate a custom KCP implementation even on error.
-    (void)kcpmux_engine_schedule_timer_node(
-        stream->conn->engine,
-        &stream->timer_node,
-        recv_time_ms,
-        recv_time_ms);
+    kcpmux_stream_accumulate_update(stream, recv_time_ms);
     if (ret < 0) {
         return KCPMUX_ERR_KCPRET(ret);
     }

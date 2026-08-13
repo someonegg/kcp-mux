@@ -37,6 +37,8 @@ struct kcpmux_stream_s {
     // Flow control state
     uint8_t                   read_blocked;    // Is read blocked
     uint8_t                   write_blocked;   // Is write blocked
+    uint32_t                  pending_count;   // Batched KCP send/input operations
+    list_head                 pending_batch_node;
 
     // Block start timestamps (for statistics)
     int64_t                   read_block_start_ts;   // Read block start time (ms)
@@ -62,6 +64,9 @@ void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason);
 
 // Update stream state
 void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now);
+
+// Finish pending batched work using a caller-supplied engine timestamp.
+void kcpmux_stream_finish_batch_at(kcpmux_stream_t *stream, int64_t now);
 
 // Refresh the stream's absolute deadline from its current state.
 void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now);

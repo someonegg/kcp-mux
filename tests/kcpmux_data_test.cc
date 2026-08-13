@@ -11,57 +11,19 @@ extern "C" {
 using namespace kcpmux_test;
 
 // ============================================================================
-// Helper: pump KCP to exchange packets between engines
-// ============================================================================
-
-static inline void pump_kcp(DualEngineContext &ctx)
-{
-    kcpmux_engine_update(ctx.client_engine);
-    kcpmux_engine_update(ctx.server_engine);
-    ctx.deliver_all();
-    kcpmux_engine_update(ctx.client_engine);
-    kcpmux_engine_update(ctx.server_engine);
-}
-
-// ============================================================================
 // Test Fixture: kcpmux_data
 // ============================================================================
 
-class kcpmux_data : public ::testing::Test {
+class kcpmux_data : public DualEngineTest {
 protected:
-    void SetUp() override {
-        ctx.setup();
-    }
-
-    void TearDown() override {
-        ctx.teardown();
-    }
-
     // Establish connection between client and server
     void establish_connection()
     {
-        // Client connects to server
-        auto client_conn_callbacks = create_conn_callbacks(&ctx.client_ctx);
-        client_conn = kcpmux_conn_connect(
-            ctx.client_engine,
-            ctx.server_addr.get(),
-            nullptr,
-            nullptr,
-            &client_conn_callbacks,
-            &ctx.client_ctx);
+        ConnectedPair pair = connect_pair();
+        client_conn = pair.client;
+        server_conn = pair.server;
         ASSERT_NE(client_conn, nullptr);
-
-        // Exchange CONN_CONNECT packet
-        pump_kcp(ctx);
-
-        // Server accepts connection
-        auto server_conn_callbacks = create_conn_callbacks(&ctx.server_ctx);
-        server_conn = kcpmux_engine_get_conn_by_addr(ctx.server_engine, ctx.client_addr.get());
         ASSERT_NE(server_conn, nullptr);
-        kcpmux_conn_set_callbacks(server_conn, &server_conn_callbacks, &ctx.server_ctx);
-
-        // Exchange CONN_CONNECT_ACK packet
-        pump_kcp(ctx);
 
         // Both should be CONNECTED
         EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CONNECTED);
@@ -123,7 +85,6 @@ protected:
     }
 
 protected:
-    DualEngineContext ctx;
     kcpmux_conn_t *client_conn = nullptr;
     kcpmux_conn_t *server_conn = nullptr;
     kcpmux_stream_t *client_stream = nullptr;
@@ -418,8 +379,8 @@ TEST_F(kcpmux_data, send_resumes_after_ack) {
     // Configure stream with very low thresholds to ensure blocking
     kcpmux_stream_config_t stream_config;
     kcpmux_stream_config_init(&stream_config);
-    stream_config.send_pause_threshold = 6;    // Block when waitsnd >= 10
-    stream_config.send_resume_threshold = 3;    // Resume when waitsnd < 5
+    stream_config.send_pause_threshold = 6;   // Block when waitsnd >= 6
+    stream_config.send_resume_threshold = 3;  // Resume when waitsnd < 3
 
     establish_connection();
     create_streams(&stream_config);
@@ -445,9 +406,6 @@ TEST_F(kcpmux_data, send_resumes_after_ack) {
     }
     EXPECT_EQ(blocked, 1);
     EXPECT_EQ(total_sent, chunk.size() * 6);
-
-    // Note: With very low threshold (waitsnd >= 2), blocking should happen quickly
-    // But if it doesn't block, the test still validates the mechanism
 
     // Pump KCP multiple times to deliver data and process ACKs
     ctx.advance_time(20); pump_kcp(ctx);

@@ -198,6 +198,15 @@ Send path:
 3. The KCP output callback adds the 8-byte KCPMUX header to each KCP segment: `type(1) + generation_id(3) + stream_id(4)`.
 4. The packet is sent to the lower layer through the `write_socket` callback.
 
+KCP update batching is controlled per stream by `batch_threshold`. Values `0`
+and `1` preserve immediate scheduling. Values greater than `1` count successful
+non-flushing sends and payload inputs together; reaching the threshold schedules
+an immediate KCP update. Call `kcpmux_stream_finish_batch()` after a batch on a
+known stream, or `kcpmux_engine_finish_batch()` after an input batch whose UDP
+packets may belong to multiple streams. The engine-level operation visits only
+streams with pending work. A nonzero `flush` still updates KCP synchronously and
+clears the accumulated count.
+
 Receive path:
 
 1. The protocol layer parses `stream_id`.

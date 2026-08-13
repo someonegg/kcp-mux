@@ -131,6 +131,7 @@ typedef struct kcpmux_proto_ext_s {
 #define KCPMUX_DEFAULT_KCP_MSS                 1200
 #define KCPMUX_DEFAULT_SEND_PAUSE_THRESHOLD    256     // Pause sending when waitsnd >= 256
 #define KCPMUX_DEFAULT_SEND_RESUME_THRESHOLD   128     // Resume sending when waitsnd < 128
+#define KCPMUX_DEFAULT_BATCH_THRESHOLD         1       // 0/1 disables update batching
 
 // ============================================================================
 // Configuration structures
@@ -163,6 +164,7 @@ typedef struct kcpmux_stream_config_s {
     uint16_t kcp_mss;                 // MTU = ... + KCPMUX header (8) + KCP header + mss
     uint32_t send_pause_threshold;    // Pause sending when waitsnd >= this value
     uint32_t send_resume_threshold;   // Resume sending when waitsnd < this value
+    uint32_t batch_threshold;         // KCP operations before requesting an immediate update
 } kcpmux_stream_config_t;
 
 // ============================================================================
