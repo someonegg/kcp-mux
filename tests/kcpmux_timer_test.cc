@@ -18,14 +18,18 @@ struct TimerNode {
     int id;
 };
 
-static void NoopTimerCallback(kcpmux_timer_node_t *, int64_t) {}
+static void NoopTimerCallback(kcpmux_timer_node_t *, int64_t)
+{
+}
 
-static void InitNode(TimerNode *node, int id) {
+static void InitNode(TimerNode *node, int id)
+{
     node->id = id;
     kcpmux_timer_node_init(&node->timer, node, NoopTimerCallback);
 }
 
-static void ExpectHeapInvariant(const kcpmux_timer_manager_t &manager) {
+static void ExpectHeapInvariant(const kcpmux_timer_manager_t &manager)
+{
     for (size_t i = 0; i < manager.size; ++i) {
         const kcpmux_timer_node_t *node = manager.heap[i];
         ASSERT_NE(node, nullptr);
@@ -219,8 +223,7 @@ TEST_F(kcpmux_timer, random_operations_match_ordered_reference_model) {
             std::multiset<std::tuple<int64_t, uint64_t, int>> reference;
             for (int i = 0; i < kNodeCount; ++i) {
                 if (scheduled[i]) {
-                    reference.emplace(
-                        model_deadline[i], model_sequence[i], i);
+                    reference.emplace(model_deadline[i], model_sequence[i], i);
                 }
             }
             for (const auto &[deadline, sequence, id] : reference) {
@@ -244,8 +247,7 @@ TEST_F(kcpmux_timer, random_operations_match_ordered_reference_model) {
             std::multiset<std::tuple<int64_t, uint64_t, int>> reference;
             for (int i = 0; i < kNodeCount; ++i) {
                 if (scheduled[i]) {
-                    reference.emplace(
-                        model_deadline[i], model_sequence[i], i);
+                    reference.emplace(model_deadline[i], model_sequence[i], i);
                 }
             }
             int expected_root = std::get<2>(*reference.begin());

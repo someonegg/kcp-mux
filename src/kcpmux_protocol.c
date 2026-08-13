@@ -10,35 +10,41 @@
 // Byte order conversion (network byte order)
 // ============================================================================
 
-static inline void __write_u16(uint8_t *buf, uint16_t val) {
+static inline void __write_u16(uint8_t *buf, uint16_t val)
+{
     buf[0] = (uint8_t)(val >> 8);
     buf[1] = (uint8_t)(val & 0xff);
 }
 
-static inline void __write_u24(uint8_t *buf, uint32_t val) {
+static inline void __write_u24(uint8_t *buf, uint32_t val)
+{
     buf[0] = (uint8_t)(val >> 16);
     buf[1] = (uint8_t)((val >> 8) & 0xff);
     buf[2] = (uint8_t)(val & 0xff);
 }
 
-static inline void __write_u32(uint8_t *buf, uint32_t val) {
+static inline void __write_u32(uint8_t *buf, uint32_t val)
+{
     buf[0] = (uint8_t)(val >> 24);
     buf[1] = (uint8_t)((val >> 16) & 0xff);
     buf[2] = (uint8_t)((val >> 8) & 0xff);
     buf[3] = (uint8_t)(val & 0xff);
 }
 
-static inline uint16_t __read_u16(const uint8_t *buf) {
+static inline uint16_t __read_u16(const uint8_t *buf)
+{
     return ((uint16_t)buf[0] << 8) | buf[1];
 }
 
-static inline uint32_t __read_u24(const uint8_t *buf) {
+static inline uint32_t __read_u24(const uint8_t *buf)
+{
     return ((uint32_t)buf[0] << 16) |
            ((uint32_t)buf[1] << 8) |
            buf[2];
 }
 
-static inline uint32_t __read_u32(const uint8_t *buf) {
+static inline uint32_t __read_u32(const uint8_t *buf)
+{
     return ((uint32_t)buf[0] << 24) |
            ((uint32_t)buf[1] << 16) |
            ((uint32_t)buf[2] << 8) |
@@ -49,10 +55,12 @@ static inline uint32_t __read_u32(const uint8_t *buf) {
 // Protocol input handling
 // ============================================================================
 
-int kcpmux_protocol_input(kcpmux_engine_t *engine,
-                         const uint8_t *buf, unsigned size,
-                         const kcpmux_addr_t *peer_addr,
-                         int64_t recv_time_ms)
+int kcpmux_protocol_input(
+    kcpmux_engine_t *engine,
+    const uint8_t *buf,
+    unsigned size,
+    const kcpmux_addr_t *peer_addr,
+    int64_t recv_time_ms)
 {
     if (!engine || !buf || size < 1 || !peer_addr || !peer_addr->addr) return -KCPMUX_ERR_INVALID_PARAM;
 
@@ -110,7 +118,9 @@ int kcpmux_protocol_input(kcpmux_engine_t *engine,
 
         if (engine->callbacks.conn_connect_notify) {
             result = engine->callbacks.conn_connect_notify(
-                new_conn, &new_conn->peer_proto_ext, &resp_ext,
+                new_conn,
+                &new_conn->peer_proto_ext,
+                &resp_ext,
                 engine->user_data);
         }
         if (result == KCPMUX_ACK_RESULT_OK) {
@@ -267,8 +277,7 @@ int kcpmux_protocol_input(kcpmux_engine_t *engine,
             conn->latest_peer_stream_id = stream_id;
             conn->peer_stream_id_initialized = 1;
 
-            int accepted = conn->callbacks.stream_create_notify(
-                stream, conn->user_data);
+            int accepted = conn->callbacks.stream_create_notify(stream, conn->user_data);
             if (accepted != 0) {
                 memset(&stream->callbacks, 0, sizeof(stream->callbacks));
                 stream->user_data = NULL;
@@ -276,17 +285,14 @@ int kcpmux_protocol_input(kcpmux_engine_t *engine,
                 stream->retry_count = 0;
                 stream->last_ctrl_ts = recv_time_ms;
                 kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);
-                kcpmux_stream_send_close(
-                    stream, KCPMUX_CLOSE_REASON_REJECTED);
+                kcpmux_stream_send_close(stream, KCPMUX_CLOSE_REASON_REJECTED);
                 if (stream->config.close_retries == 0) {
-                    kcpmux_stream_close_internal(
-                        stream, KCPMUX_CLOSE_REASON_REJECTED);
+                    kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_REJECTED);
                 }
                 return 0;
             }
 
-            int ret = kcpmux_stream_handle_payload(
-                stream, buf + 8, size - 8, recv_time_ms);
+            int ret = kcpmux_stream_handle_payload(stream, buf + 8, size - 8, recv_time_ms);
             if (ret != 0) {
                 kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_ERROR);
                 kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_ERROR);
@@ -296,8 +302,7 @@ int kcpmux_protocol_input(kcpmux_engine_t *engine,
             return ret;
         }
 
-        int ret = kcpmux_stream_handle_payload(
-            stream, buf + 8, size - 8, recv_time_ms);
+        int ret = kcpmux_stream_handle_payload(stream, buf + 8, size - 8, recv_time_ms);
         if (ret == 0) {
             kcpmux_conn_note_receive(conn, recv_time_ms, 1);
         }
@@ -313,13 +318,14 @@ int kcpmux_protocol_input(kcpmux_engine_t *engine,
 // Message send implementation
 // ============================================================================
 
-static inline void __write_common(uint8_t *buf, uint8_t type,
-                                  const kcpmux_conn_t *conn) {
+static inline void __write_common(uint8_t *buf, uint8_t type, const kcpmux_conn_t *conn)
+{
     buf[0] = type;
     __write_u24(buf + 1, conn->generation_id);
 }
 
-int kcpmux_protocol_send_conn_connect(kcpmux_conn_t *conn) {
+int kcpmux_protocol_send_conn_connect(kcpmux_conn_t *conn)
+{
     if (!conn) return -KCPMUX_ERR_INVALID_PARAM;
 
     // conn_connect: common(4) + version(1) + ext_len(2) + ext(N)
@@ -337,7 +343,8 @@ int kcpmux_protocol_send_conn_connect(kcpmux_conn_t *conn) {
     return kcpmux_conn_write_socket(conn, buf, msg_len);
 }
 
-int kcpmux_protocol_send_conn_connect_ack(kcpmux_conn_t *conn, uint8_t result) {
+int kcpmux_protocol_send_conn_connect_ack(kcpmux_conn_t *conn, uint8_t result)
+{
     if (!conn) return -KCPMUX_ERR_INVALID_PARAM;
 
     // conn_connect_ack: common(4) + version(1) + result(1) + ext_len(2) + ext(N)
@@ -356,7 +363,8 @@ int kcpmux_protocol_send_conn_connect_ack(kcpmux_conn_t *conn, uint8_t result) {
     return kcpmux_conn_write_socket(conn, buf, msg_len);
 }
 
-int kcpmux_protocol_send_conn_keepalive(kcpmux_conn_t *conn) {
+int kcpmux_protocol_send_conn_keepalive(kcpmux_conn_t *conn)
+{
     if (!conn) return -KCPMUX_ERR_INVALID_PARAM;
 
     // conn_keepalive: common(4) + time(4) + seq(4)
@@ -368,7 +376,8 @@ int kcpmux_protocol_send_conn_keepalive(kcpmux_conn_t *conn) {
     return kcpmux_conn_write_socket(conn, buf, sizeof(buf));
 }
 
-int kcpmux_protocol_send_conn_close(kcpmux_conn_t *conn, uint8_t reason) {
+int kcpmux_protocol_send_conn_close(kcpmux_conn_t *conn, uint8_t reason)
+{
     if (!conn) return -KCPMUX_ERR_INVALID_PARAM;
 
     // conn_close: common(4) + reason(1)
@@ -379,7 +388,8 @@ int kcpmux_protocol_send_conn_close(kcpmux_conn_t *conn, uint8_t reason) {
     return kcpmux_conn_write_socket(conn, buf, sizeof(buf));
 }
 
-int kcpmux_protocol_send_conn_close_ack(kcpmux_conn_t *conn, uint8_t reason) {
+int kcpmux_protocol_send_conn_close_ack(kcpmux_conn_t *conn, uint8_t reason)
+{
     if (!conn) return -KCPMUX_ERR_INVALID_PARAM;
 
     // conn_close_ack: common(4) + reason(1)
@@ -390,7 +400,8 @@ int kcpmux_protocol_send_conn_close_ack(kcpmux_conn_t *conn, uint8_t reason) {
     return kcpmux_conn_write_socket(conn, buf, sizeof(buf));
 }
 
-int kcpmux_protocol_send_stream_close(kcpmux_stream_t *stream, uint8_t reason) {
+int kcpmux_protocol_send_stream_close(kcpmux_stream_t *stream, uint8_t reason)
+{
     if (!stream) return -KCPMUX_ERR_INVALID_PARAM;
 
     kcpmux_conn_t *conn = stream->conn;
@@ -404,7 +415,8 @@ int kcpmux_protocol_send_stream_close(kcpmux_stream_t *stream, uint8_t reason) {
     return kcpmux_conn_write_socket(conn, buf, sizeof(buf));
 }
 
-int kcpmux_protocol_send_stream_close_ack(kcpmux_stream_t *stream, uint8_t reason) {
+int kcpmux_protocol_send_stream_close_ack(kcpmux_stream_t *stream, uint8_t reason)
+{
     if (!stream) return -KCPMUX_ERR_INVALID_PARAM;
 
     kcpmux_conn_t *conn = stream->conn;
@@ -418,7 +430,11 @@ int kcpmux_protocol_send_stream_close_ack(kcpmux_stream_t *stream, uint8_t reaso
     return kcpmux_conn_write_socket(conn, buf, sizeof(buf));
 }
 
-int kcpmux_protocol_send_stream_payload(kcpmux_stream_t *stream, const uint8_t *kcp_data, unsigned size) {
+int kcpmux_protocol_send_stream_payload(
+    kcpmux_stream_t *stream,
+    const uint8_t *kcp_data,
+    unsigned size)
+{
     if (!stream || !kcp_data || size == 0) return -KCPMUX_ERR_INVALID_PARAM;
 
     kcpmux_conn_t *conn = stream->conn;

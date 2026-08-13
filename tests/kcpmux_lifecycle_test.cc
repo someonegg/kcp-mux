@@ -10,7 +10,8 @@ struct ImmediateTimerOwner {
     int callback_count = 0;
 };
 
-void immediate_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms) {
+void immediate_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms)
+{
     auto *owner = static_cast<ImmediateTimerOwner *>(node->owner);
     owner->callback_count++;
     if (owner->callback_count == 1) {
@@ -27,13 +28,15 @@ struct CloseOrderContext : TestContext {
     uint8_t conn_state = KCPMUX_CONN_STATE_ERROR;
 };
 
-void record_stream_close(kcpmux_stream_t *stream, int, void *user_data) {
+void record_stream_close(kcpmux_stream_t *stream, int, void *user_data)
+{
     auto *ctx = static_cast<CloseOrderContext *>(user_data);
     ctx->notifications.push_back('S');
     ctx->stream_state = stream->state;
 }
 
-void record_conn_close(kcpmux_conn_t *conn, int, void *user_data) {
+void record_conn_close(kcpmux_conn_t *conn, int, void *user_data)
+{
     auto *ctx = static_cast<CloseOrderContext *>(user_data);
     ctx->notifications.push_back('C');
     ctx->conn_state = conn->state;
@@ -46,7 +49,8 @@ struct DueFreeOwner {
     int callback_count = 0;
 };
 
-void close_other_due_stream(kcpmux_timer_node_t *node, int64_t now_ms) {
+void close_other_due_stream(kcpmux_timer_node_t *node, int64_t now_ms)
+{
     auto *owner = static_cast<DueFreeOwner *>(node->owner);
     owner->callback_count++;
     EXPECT_EQ(kcpmux_stream_close(owner->stream), 0);
@@ -54,8 +58,8 @@ void close_other_due_stream(kcpmux_timer_node_t *node, int64_t now_ms) {
     kcpmux_engine_cancel_timer_node(owner->engine, node, now_ms);
 }
 
-kcpmux_conn_t *create_connected_conn(kcpmux_engine_t *engine,
-                                    const kcpmux_addr_t *addr) {
+kcpmux_conn_t *create_connected_conn(kcpmux_engine_t *engine, const kcpmux_addr_t *addr)
+{
     kcpmux_conn_t *conn = kcpmux_conn_new(engine, addr, nullptr, 1);
     if (!conn) return nullptr;
     kcpmux_engine_add_conn(engine, conn);
@@ -79,7 +83,8 @@ TEST(kcpmux_lifecycle, engine_create_destroy) {
 }
 
 TEST(kcpmux_lifecycle, engine_create_null_callbacks) {
-    kcpmux_engine_t *engine = kcpmux_engine_create(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
+    kcpmux_engine_t
+        *engine = kcpmux_engine_create(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr);
     EXPECT_EQ(engine, nullptr);
 }
 
@@ -152,8 +157,7 @@ TEST(kcpmux_lifecycle, conn_finalization_closes_streams_before_conn_notification
     kcpmux_conn_set_callbacks(conn, &conn_callbacks, &ctx);
     kcpmux_stream_callbacks_t stream_callbacks{};
     stream_callbacks.stream_close_notify = record_stream_close;
-    kcpmux_stream_t *stream = kcpmux_stream_create(
-        conn, nullptr, &stream_callbacks, &ctx);
+    kcpmux_stream_t *stream = kcpmux_stream_create(conn, nullptr, &stream_callbacks, &ctx);
     ASSERT_NE(stream, nullptr);
 
     kcpmux_engine_operation_enter(engine);
@@ -204,8 +208,8 @@ TEST(kcpmux_lifecycle, empty_heap_stale_timer_fire_is_consumed_without_rearm) {
     TestContext ctx;
     kcpmux_engine_t *engine = create_test_engine(&ctx);
     TestAddr addr(0x7f000001, 12006);
-    kcpmux_conn_t *conn = kcpmux_conn_connect(
-        engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
     ASSERT_TRUE(ctx.timer_probe.armed);
     kcpmux_engine_operation_enter(engine);
@@ -249,8 +253,12 @@ TEST(kcpmux_lifecycle, conn_connect_success) {
     // Client initiates connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_conn, nullptr);
     EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CONNECTING);
 
@@ -259,7 +267,8 @@ TEST(kcpmux_lifecycle, conn_connect_success) {
 
     // Server should have accepted and created connection
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     ASSERT_NE(server_conn, nullptr);
     EXPECT_EQ(kcpmux_conn_get_state(server_conn), KCPMUX_CONN_STATE_CONNECTED);
 
@@ -279,12 +288,17 @@ TEST(kcpmux_lifecycle, conn_close_initiator) {
     // Establish connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
@@ -317,8 +331,12 @@ TEST(kcpmux_lifecycle, conn_state_callbacks) {
     ctx.client_ctx.conn_state_changes.clear();
 
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     (void)client_conn;
 
     // Initial state change: INIT -> CONNECTING
@@ -357,8 +375,12 @@ TEST(kcpmux_lifecycle, conn_connect_rejected) {
     // Client initiates connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_conn, nullptr);
 
     // Deliver CONN_CONNECT to server (server rejects)
@@ -384,10 +406,12 @@ TEST(kcpmux_lifecycle, conn_duplicate_connect) {
 
     TestAddr addr(0x7f000001, 12345);
 
-    kcpmux_conn_t *conn1 = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn1 = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
     ASSERT_NE(conn1, nullptr);
 
-    kcpmux_conn_t *conn2 = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn2 = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
     EXPECT_EQ(conn2, nullptr);
 
     kcpmux_engine_destroy(engine);
@@ -400,7 +424,8 @@ TEST(kcpmux_lifecycle, conn_get_by_addr) {
 
     TestAddr addr(0x7f000001, 12345);
 
-    kcpmux_conn_t *conn = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
 
     kcpmux_conn_t *found = kcpmux_engine_get_conn_by_addr(engine, addr.get());
@@ -434,8 +459,8 @@ TEST(kcpmux_lifecycle, conn_connect_timeout_retry) {
     kcpmux_conn_callbacks_t callbacks = create_conn_callbacks(&ctx);
 
     // Client initiates connection
-    kcpmux_conn_t *conn = kcpmux_conn_connect(
-        engine, addr.get(), &conn_config, nullptr, &callbacks, &ctx);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), &conn_config, nullptr, &callbacks, &ctx);
     ASSERT_NE(conn, nullptr);
     EXPECT_EQ(kcpmux_conn_get_state(conn), KCPMUX_CONN_STATE_CONNECTING);
 
@@ -486,8 +511,8 @@ TEST(kcpmux_lifecycle, conn_control_deadline_does_not_drift) {
     kcpmux_engine_t *engine = create_test_engine(&ctx);
     ASSERT_NE(engine, nullptr);
     TestAddr addr(0x7f000001, 12345);
-    kcpmux_conn_t *conn = kcpmux_conn_connect(
-        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), &config, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
 
     ASSERT_NE(kcpmux_timer_peek(&engine->timer_manager), nullptr);
@@ -530,12 +555,11 @@ TEST(kcpmux_lifecycle, conn_config_replaces_timer_earlier_and_later) {
     kcpmux_engine_t *engine = create_test_engine(&ctx);
     ASSERT_NE(engine, nullptr);
     TestAddr addr(0x7f000001, 12345);
-    kcpmux_conn_t *conn = kcpmux_conn_connect(
-        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), &config, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
 
-    auto ack = build_conn_connect_ack(
-        KCPMUX_ACK_RESULT_OK, conn->generation_id);
+    auto ack = build_conn_connect_ack(KCPMUX_ACK_RESULT_OK, conn->generation_id);
     ASSERT_EQ(kcpmux_engine_input(
         engine, ack.data(), (unsigned)ack.size(), addr.get()), 0);
     EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 2000);
@@ -578,12 +602,11 @@ TEST(kcpmux_lifecycle, conn_connected_deadline_uses_all_anchors) {
     kcpmux_engine_t *engine = create_test_engine(&ctx);
     ASSERT_NE(engine, nullptr);
     TestAddr addr(0x7f000001, 12345);
-    kcpmux_conn_t *conn = kcpmux_conn_connect(
-        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), &config, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
 
-    auto ack = build_conn_connect_ack(
-        KCPMUX_ACK_RESULT_OK, conn->generation_id);
+    auto ack = build_conn_connect_ack(KCPMUX_ACK_RESULT_OK, conn->generation_id);
     ASSERT_EQ(kcpmux_engine_input(
         engine, ack.data(), (unsigned)ack.size(), addr.get()), 0);
     EXPECT_EQ(kcpmux_timer_peek(&engine->timer_manager)->deadline_ms, 1200);
@@ -612,12 +635,11 @@ TEST(kcpmux_lifecycle, zero_keepalive_interval_disables_sending) {
     kcpmux_engine_t *engine = create_test_engine(&ctx);
     ASSERT_NE(engine, nullptr);
     TestAddr addr(0x7f000001, 12345);
-    kcpmux_conn_t *conn = kcpmux_conn_connect(
-        engine, addr.get(), &config, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), &config, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
 
-    auto ack = build_conn_connect_ack(
-        KCPMUX_ACK_RESULT_OK, conn->generation_id);
+    auto ack = build_conn_connect_ack(KCPMUX_ACK_RESULT_OK, conn->generation_id);
     ASSERT_EQ(kcpmux_engine_input(
         engine, ack.data(), (unsigned)ack.size(), addr.get()), 0);
     ctx.sent_packets.clear();
@@ -650,8 +672,12 @@ TEST(kcpmux_lifecycle, conn_keepalive_timeout) {
     // Client initiates connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), &conn_config, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        &conn_config,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_conn, nullptr);
 
     // Complete handshake
@@ -689,8 +715,12 @@ TEST(kcpmux_lifecycle, conn_idle_timeout) {
     // Client initiates connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), &conn_config, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        &conn_config,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_conn, nullptr);
 
     // Complete handshake
@@ -735,8 +765,12 @@ TEST(kcpmux_lifecycle, conn_close_timeout) {
     // Establish connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), &conn_config, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        &conn_config,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
     EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CONNECTED);
 
@@ -773,8 +807,12 @@ TEST(kcpmux_lifecycle, conn_close_zero_retries_sends_once_without_waiting) {
     config.close_retries = 0;
     kcpmux_conn_callbacks_t callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), &config, nullptr,
-        &callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        &config,
+        nullptr,
+        &callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(conn, nullptr);
     ctx.deliver_all();
     ASSERT_EQ(kcpmux_conn_get_state(conn), KCPMUX_CONN_STATE_CONNECTED);
@@ -811,19 +849,27 @@ TEST(kcpmux_lifecycle, stream_close_timeout) {
     // Establish connection and stream
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     // Set server-side callbacks to accept incoming streams
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
     kcpmux_stream_callbacks_t stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
     kcpmux_stream_t *stream = kcpmux_stream_create(
-        client_conn, &stream_config, &stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        &stream_config,
+        &stream_callbacks,
+        &ctx.client_ctx);
     EXPECT_EQ(kcpmux_stream_get_state(stream), KCPMUX_STREAM_STATE_OPEN);
     uint32_t stream_id = kcpmux_stream_id(stream);
 
@@ -866,19 +912,27 @@ TEST(kcpmux_lifecycle, stream_create_success) {
     // Establish connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
     // Client creates stream
     kcpmux_stream_callbacks_t stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
     kcpmux_stream_t *client_stream = kcpmux_stream_create(
-        client_conn, nullptr, &stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &stream_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_stream, nullptr);
     EXPECT_EQ(kcpmux_stream_get_state(client_stream), KCPMUX_STREAM_STATE_OPEN);
 
@@ -904,18 +958,26 @@ TEST(kcpmux_lifecycle, stream_close_initiator) {
     // Establish connection and stream
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
     kcpmux_stream_callbacks_t client_stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
     kcpmux_stream_t *client_stream = kcpmux_stream_create(
-        client_conn, nullptr, &client_stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &client_stream_callbacks,
+        &ctx.client_ctx);
 
     // Send bootstrap payload to trigger server-side auto-create.
     uint8_t bootstrap = 0x7f;
@@ -953,13 +1015,18 @@ TEST(kcpmux_lifecycle, stream_state_callbacks) {
     // Establish connection
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     // Set server-side callbacks to accept incoming streams
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
@@ -967,7 +1034,10 @@ TEST(kcpmux_lifecycle, stream_state_callbacks) {
     ctx.client_ctx.stream_state_changes.clear();
     kcpmux_stream_callbacks_t stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
     kcpmux_stream_t *client_stream = kcpmux_stream_create(
-        client_conn, nullptr, &stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &stream_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_stream, nullptr);
 
     // Send bootstrap payload so close uses protocol close path.
@@ -992,13 +1062,20 @@ TEST(kcpmux_lifecycle, stream_close_initiator_without_payload_immediate_close) {
 
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     kcpmux_stream_callbacks_t stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
     kcpmux_stream_t *stream = kcpmux_stream_create(
-        client_conn, nullptr, &stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &stream_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(stream, nullptr);
     EXPECT_EQ(stream->is_initiator, 1);
     EXPECT_EQ(stream->stats.up_sent_bytes, 0u);
@@ -1021,18 +1098,26 @@ TEST(kcpmux_lifecycle, stream_close_acceptor_without_payload_keeps_protocol_clos
 
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
     kcpmux_stream_callbacks_t client_stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
     kcpmux_stream_t *client_stream = kcpmux_stream_create(
-        client_conn, nullptr, &client_stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &client_stream_callbacks,
+        &ctx.client_ctx);
     ASSERT_NE(client_stream, nullptr);
 
     // Bootstrap payload triggers server-side auto-create. Server stream has up_sent_bytes == 0.
@@ -1066,7 +1151,8 @@ TEST(kcpmux_lifecycle, stream_create_on_non_connected) {
     ASSERT_NE(engine, nullptr);
 
     TestAddr addr(0x7f000001, 12345);
-    kcpmux_conn_t *conn = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
+    kcpmux_conn_t
+        *conn = kcpmux_conn_connect(engine, addr.get(), nullptr, nullptr, nullptr, nullptr);
     ASSERT_NE(conn, nullptr);
 
     // Connection is in CONNECTING state, not CONNECTED
@@ -1090,13 +1176,18 @@ TEST(kcpmux_lifecycle, conn_close_cascades_streams) {
     // Establish connection and streams
     kcpmux_conn_callbacks_t client_callbacks = create_conn_callbacks(&ctx.client_ctx);
     kcpmux_conn_t *client_conn = kcpmux_conn_connect(
-        ctx.client_engine, ctx.server_addr.get(), nullptr, nullptr,
-        &client_callbacks, &ctx.client_ctx);
+        ctx.client_engine,
+        ctx.server_addr.get(),
+        nullptr,
+        nullptr,
+        &client_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     // Set server-side callbacks to accept incoming streams
     kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
-        ctx.server_engine, ctx.client_addr.get());
+        ctx.server_engine,
+        ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
     kcpmux_conn_set_callbacks(server_conn, &server_callbacks, &ctx.server_ctx);
 
@@ -1104,11 +1195,17 @@ TEST(kcpmux_lifecycle, conn_close_cascades_streams) {
 
     // Create multiple streams
     kcpmux_stream_t *stream1 = kcpmux_stream_create(
-        client_conn, nullptr, &stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &stream_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     kcpmux_stream_t *stream2 = kcpmux_stream_create(
-        client_conn, nullptr, &stream_callbacks, &ctx.client_ctx);
+        client_conn,
+        nullptr,
+        &stream_callbacks,
+        &ctx.client_ctx);
     ctx.deliver_all();
 
     EXPECT_EQ(kcpmux_stream_get_state(stream1), KCPMUX_STREAM_STATE_OPEN);

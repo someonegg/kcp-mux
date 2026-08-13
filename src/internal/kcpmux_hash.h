@@ -8,8 +8,8 @@
 extern "C" {
 #endif
 
-uint32_t kcpmux_hash32(const void* p, size_t len);
-uint32_t kcpmux_hash32_str(const char* s);
+uint32_t kcpmux_hash32(const void *p, size_t len);
+uint32_t kcpmux_hash32_str(const char *s);
 
 #ifdef __cplusplus
 }

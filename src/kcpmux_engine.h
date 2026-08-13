@@ -56,33 +56,38 @@ struct kcpmux_engine_s {
 int64_t kcpmux_engine_now(kcpmux_engine_t *engine);
 
 // Timer node lifecycle and scheduling
-int kcpmux_engine_register_timer_node(kcpmux_engine_t *engine,
-                                     kcpmux_timer_node_t *node,
-                                     void *owner,
-                                     kcpmux_timer_cb timeout_cb);
-void kcpmux_engine_unregister_timer_node(kcpmux_engine_t *engine,
-                                        kcpmux_timer_node_t *node);
-int kcpmux_engine_schedule_timer_node(kcpmux_engine_t *engine,
-                                     kcpmux_timer_node_t *node,
-                                     int64_t deadline_ms,
-                                     int64_t now_ms);
-void kcpmux_engine_cancel_timer_node(kcpmux_engine_t *engine,
-                                    kcpmux_timer_node_t *node,
-                                    int64_t now_ms);
+int kcpmux_engine_register_timer_node(
+    kcpmux_engine_t *engine,
+    kcpmux_timer_node_t *node,
+    void *owner,
+    kcpmux_timer_cb timeout_cb);
+void kcpmux_engine_unregister_timer_node(kcpmux_engine_t *engine, kcpmux_timer_node_t *node);
+int kcpmux_engine_schedule_timer_node(
+    kcpmux_engine_t *engine,
+    kcpmux_timer_node_t *node,
+    int64_t deadline_ms,
+    int64_t now_ms);
+void kcpmux_engine_cancel_timer_node(
+    kcpmux_engine_t *engine,
+    kcpmux_timer_node_t *node,
+    int64_t now_ms);
 void kcpmux_engine_rearm_timer(kcpmux_engine_t *engine, int64_t now_ms);
 
 // Keep terminal owners alive until the current internal operation returns.
 void kcpmux_engine_operation_enter(kcpmux_engine_t *engine);
 void kcpmux_engine_operation_leave(kcpmux_engine_t *engine);
-void kcpmux_engine_queue_release(kcpmux_engine_t *engine,
-                                kcpmux_pending_release_t *item,
-                                kcpmux_release_cb release_cb);
+void kcpmux_engine_queue_release(
+    kcpmux_engine_t *engine,
+    kcpmux_pending_release_t *item,
+    kcpmux_release_cb release_cb);
 
 // Send data to socket
 // Return: 0 on success, < 0 on error
-int kcpmux_engine_write_socket(kcpmux_engine_t *engine,
-                              const uint8_t *buf, unsigned size,
-                              const kcpmux_addr_t *addr);
+int kcpmux_engine_write_socket(
+    kcpmux_engine_t *engine,
+    const uint8_t *buf,
+    unsigned size,
+    const kcpmux_addr_t *addr);
 
 // Add/remove connection
 void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn);

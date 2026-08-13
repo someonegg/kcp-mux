@@ -42,8 +42,10 @@ TEST_F(kcpmux_e2e_basic, connect_with_extension) {
     ctx.server.conn_proto_ext_response.assign(server_resp_ext.begin(), server_resp_ext.end());
 
     // Client connects with extension data
-    ctx.client.connect_to_with_ext(ctx.client.peer_addr,
-                                   (const uint8_t *)client_ext.c_str(), client_ext.size());
+    ctx.client.connect_to_with_ext(
+        ctx.client.peer_addr,
+        (const uint8_t *)client_ext.c_str(),
+        client_ext.size());
 
     // Wait for both sides to be CONNECTED
     ASSERT_TRUE(ctx.wait_conn_state(ctx.client, KCPMUX_CONN_STATE_CONNECTED, 3000));
@@ -209,11 +211,17 @@ TEST_F(kcpmux_e2e_basic, send_recv_bidirectional) {
 
     // Verify server received client's data
     uint8_t server_recv[256];
-    size_t server_recv_len = ctx.server.get_received_data(stream_id, server_recv, sizeof(server_recv));
+    size_t server_recv_len = ctx.server.get_received_data(
+        stream_id,
+        server_recv,
+        sizeof(server_recv));
     EXPECT_EQ(std::string((char *)server_recv + 1, server_recv_len - 1), client_data);
 
     // Verify client received server's data
     uint8_t client_recv[256];
-    size_t client_recv_len = ctx.client.get_received_data(stream_id, client_recv, sizeof(client_recv));
+    size_t client_recv_len = ctx.client.get_received_data(
+        stream_id,
+        client_recv,
+        sizeof(client_recv));
     EXPECT_EQ(std::string((char *)client_recv, client_recv_len), server_data);
 }

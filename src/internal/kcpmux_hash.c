@@ -11,7 +11,7 @@
 #define rotateleft(n, d) ((((unsigned)(n) << (unsigned)(d))) | ((unsigned)(n) >> (sizeof(int)*8 - (unsigned)(d))))
 
 // murmur3
-uint32_t kcpmux_hash32(const void* p, size_t len)
+uint32_t kcpmux_hash32(const void *p, size_t len)
 {
 #define C1_32   0xcc9e2d51
 #define C2_32   0x1b873593
@@ -66,7 +66,7 @@ uint32_t kcpmux_hash32(const void* p, size_t len)
     return (unsigned)hash;
 }
 
-uint32_t kcpmux_hash32_str(const char* s)
+uint32_t kcpmux_hash32_str(const char *s)
 {
     return kcpmux_hash32(s, strlen(s));
 }

@@ -8,70 +8,38 @@
 extern "C" {
 #endif
 
-// ============================================================================
-// KCP Abstraction
-// ============================================================================
+// KCP abstraction.
 
 typedef struct kcpmux_kcp_ops_s {
-    // All operations must return synchronously and must not call kcpmux_* APIs.
-    // An installed output callback may only reach the non-reentrant engine
-    // write_socket callback.
-    // ========================================================================
-    // Lifecycle
-    // ========================================================================
+    // Operations are synchronous and must not reenter kcpmux. The installed
+    // output callback may only reach the engine write_socket callback.
 
-    // Create kcp instance (e.g., KCP)
-    // kcp_*: ikcp_create(kcp_conv, kcp_user)
-    // engine_user: engine user data pointer
-    // Returns: kcp instance handle (opaque pointer)
-    void* (*create)(uint32_t kcp_conv, void *kcp_user, void *engine_user);
+    // Creates an opaque KCP instance. engine_user is the engine user data.
+    void *(*create)(uint32_t kcp_conv, void *kcp_user, void *engine_user);
 
-    // Destroy kcp instance
     void (*release)(void *kcp);
-
-    // ========================================================================
-    // Data Transfer
-    // ========================================================================
 
     void (*setmss)(void *kcp, int mss);
 
-    // Set output callback for sending data to lower layer
-    // output: callback function to send data
-    // Returns: 0 on success, -1 on error
-    void (*setoutput)(void *kcp,
-                     int (*output)(const char *buf, int len, void *kcp, void *user));
+    // Installs the lower-layer output callback.
+    void (*setoutput)(void *kcp, int (*output)(const char *buf, int len, void *kcp, void *user));
 
-    // Send data to kcp
-    // Returns: 0 on success, -1 on error
+    // Returns 0 on success or -1 on error.
     int (*send)(void *kcp, const char *buf, int len);
 
-    // Input data from network into kcp
-    // Returns: 0 on success, -1 on error
+    // Returns 0 on success or -1 on error.
     int (*input)(void *kcp, const char *data, long size);
 
-    // Receive data from kcp (consumes data)
-    // Returns: bytes received, <= 0 if no data or error
+    // Consumes and returns received bytes, or <= 0 if unavailable or invalid.
     int (*recv)(void *kcp, char *buf, int len);
 
-    // ========================================================================
-    // State Query
-    // ========================================================================
-
-    // Get readable data size (without consuming)
-    // Returns: readable bytes, 0 if no data
+    // Returns readable bytes without consuming them.
     int (*peeksize)(void *kcp);
 
-    // Get waiting send data size
-    // Returns: number of segments waiting to be sent
+    // Returns the number of segments waiting to be sent.
     int (*waitsnd)(void *kcp);
 
-    // ========================================================================
-    // Timer
-    // ========================================================================
-
-    // update state (call it repeatedly, every 10ms-100ms), or you can ask
-    // 'check' when to call it again (without send/input calling).
-    // current: current timestamp in millisec.
+    // update advances state to current; check returns the next update time.
     void (*update)(void *kcp, int64_t current);
     int64_t (*check)(void *kcp, int64_t current);
 
@@ -80,9 +48,7 @@ typedef struct kcpmux_kcp_ops_s {
 
 } kcpmux_kcp_ops_t;
 
-// ============================================================================
-// Default KCP Implementation
-// ============================================================================
+// Default KCP implementation.
 
 #define KCPMUX_IKCP_OVERHEAD                  (24)
 
@@ -92,8 +58,7 @@ typedef struct kcpmux_kcp_ops_s {
 #define KCPMUX_KCP_NODELAY_FASTACK            (3)
 #define KCPMUX_KCP_NODELAY_FLOWCTRL           (1)
 
-// Get default KCP ops.
-kcpmux_kcp_ops_t* kcpmux_default_kcp_ops(void);
+kcpmux_kcp_ops_t *kcpmux_default_kcp_ops(void);
 
 #ifdef __cplusplus
 }

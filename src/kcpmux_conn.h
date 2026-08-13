@@ -69,10 +69,11 @@ struct kcpmux_conn_s {
 // ============================================================================
 
 // Create connection (internal use)
-kcpmux_conn_t *kcpmux_conn_new(kcpmux_engine_t *engine,
-                             const kcpmux_addr_t *peer_addr,
-                             const kcpmux_conn_config_t *config,
-                             uint8_t is_initiator);
+kcpmux_conn_t *kcpmux_conn_new(
+    kcpmux_engine_t *engine,
+    const kcpmux_addr_t *peer_addr,
+    const kcpmux_conn_config_t *config,
+    uint8_t is_initiator);
 
 // Finalize a connection and queue its physical release.
 void kcpmux_conn_close_internal(kcpmux_conn_t *conn, uint8_t reason);
@@ -84,9 +85,7 @@ void kcpmux_conn_update(kcpmux_conn_t *conn, int64_t now);
 void kcpmux_conn_refresh_timer(kcpmux_conn_t *conn, int64_t now);
 
 // Record a successfully handled packet and optionally a stream payload.
-void kcpmux_conn_note_receive(kcpmux_conn_t *conn,
-                             int64_t recv_time_ms,
-                             uint8_t is_payload);
+void kcpmux_conn_note_receive(kcpmux_conn_t *conn, int64_t recv_time_ms, uint8_t is_payload);
 
 // State change
 void kcpmux_conn_set_state(kcpmux_conn_t *conn, uint8_t new_state);
@@ -111,7 +110,6 @@ kcpmux_stream_t *kcpmux_conn_get_stream_by_id(kcpmux_conn_t *conn, uint32_t stre
 uint32_t kcpmux_conn_alloc_stream_id(kcpmux_conn_t *conn);
 
 // Return non-zero when an unknown peer stream ID may be created.
-int kcpmux_conn_is_new_peer_stream_id(const kcpmux_conn_t *conn,
-                                     uint32_t stream_id);
+int kcpmux_conn_is_new_peer_stream_id(const kcpmux_conn_t *conn, uint32_t stream_id);
 
 #endif // __KCPMUX_CONN_H__

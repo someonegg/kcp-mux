@@ -37,19 +37,20 @@ struct demo_client_s {
 static void demo_client_stream_read_notify(kcpmux_stream_t *stream, void *user_data);
 static int demo_client_process_reads(demo_client_t *client);
 
-static void
-demo_client_usage(const char *prog)
+static void demo_client_usage(const char *prog)
 {
-    fprintf(stderr,
-            "Usage: %s [--host ADDR] [--port PORT] [--streams N] [--message TEXT] "
-            "[--timeout-ms MS] [--quiet]\n"
-            "\n"
-            "Defaults: --host %s --port %d --streams 3 --message hello --timeout-ms 5000\n",
-            prog, DEMO_DEFAULT_HOST, DEMO_DEFAULT_PORT);
+    fprintf(
+        stderr,
+        "Usage: %s [--host ADDR] [--port PORT] [--streams N] [--message TEXT] "
+        "[--timeout-ms MS] [--quiet]\n"
+        "\n"
+        "Defaults: --host %s --port %d --streams 3 --message hello --timeout-ms 5000\n",
+        prog,
+        DEMO_DEFAULT_HOST,
+        DEMO_DEFAULT_PORT);
 }
 
-static int
-demo_client_parse_args(int argc, char **argv, demo_client_t *client)
+static int demo_client_parse_args(int argc, char **argv, demo_client_t *client)
 {
     client->host = DEMO_DEFAULT_HOST;
     client->port = DEMO_DEFAULT_PORT;
@@ -108,9 +109,11 @@ demo_client_parse_args(int argc, char **argv, demo_client_t *client)
     return 0;
 }
 
-static void
-demo_client_conn_state_changed(kcpmux_conn_t *conn, uint8_t old_state,
-                               uint8_t new_state, void *user_data)
+static void demo_client_conn_state_changed(
+    kcpmux_conn_t *conn,
+    uint8_t old_state,
+    uint8_t new_state,
+    void *user_data)
 {
     demo_client_t *client = (demo_client_t *)user_data;
     (void)conn;
@@ -123,8 +126,7 @@ demo_client_conn_state_changed(kcpmux_conn_t *conn, uint8_t old_state,
     }
 }
 
-static void
-demo_client_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
+static void demo_client_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
 {
     demo_client_t *client = (demo_client_t *)user_data;
     (void)conn;
@@ -138,8 +140,7 @@ demo_client_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
     }
 }
 
-static void
-demo_client_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data)
+static void demo_client_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data)
 {
     demo_client_stream_t *client_stream = (demo_client_stream_t *)user_data;
 
@@ -157,8 +158,7 @@ demo_client_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_
     }
 }
 
-static int
-demo_client_connect(demo_client_t *client)
+static int demo_client_connect(demo_client_t *client)
 {
     struct sockaddr_in peer;
     uint8_t addr_buf[6];
@@ -176,13 +176,17 @@ demo_client_connect(demo_client_t *client)
     callbacks.conn_state_changed = demo_client_conn_state_changed;
     callbacks.conn_close_notify = demo_client_conn_close_notify;
 
-    client->conn = kcpmux_conn_connect(client->endpoint.engine, &addr, NULL, NULL,
-                                       &callbacks, client);
+    client->conn = kcpmux_conn_connect(
+        client->endpoint.engine,
+        &addr,
+        NULL,
+        NULL,
+        &callbacks,
+        client);
     return client->conn != NULL ? 0 : -1;
 }
 
-static int
-demo_client_start_streams(demo_client_t *client)
+static int demo_client_start_streams(demo_client_t *client)
 {
     kcpmux_stream_callbacks_t callbacks;
 
@@ -197,30 +201,37 @@ demo_client_start_streams(demo_client_t *client)
 
         memset(client_stream, 0, sizeof(*client_stream));
         client_stream->client = client;
-        written = snprintf(client_stream->payload, sizeof(client_stream->payload),
-                           "stream=%u message=%s", i + 1, client->message);
+        written = snprintf(
+            client_stream->payload,
+            sizeof(client_stream->payload),
+            "stream=%u message=%s",
+            i + 1,
+            client->message);
         if (written < 0 || (size_t)written >= sizeof(client_stream->payload)) {
             return -1;
         }
         client_stream->payload_len = (size_t)written;
 
-        client_stream->stream = kcpmux_stream_create(client->conn, NULL, &callbacks,
-                                                     client_stream);
+        client_stream->stream = kcpmux_stream_create(client->conn, NULL, &callbacks, client_stream);
         if (client_stream->stream == NULL) {
             return -1;
         }
         client_stream->stream_id = kcpmux_stream_id(client_stream->stream);
 
-        sent = kcpmux_stream_send(client_stream->stream,
-                                  (const uint8_t *)client_stream->payload,
-                                  (unsigned)client_stream->payload_len, 1);
+        sent = kcpmux_stream_send(
+            client_stream->stream,
+            (const uint8_t *)client_stream->payload,
+            (unsigned)client_stream->payload_len,
+            1);
         if (sent <= 0) {
             return -1;
         }
 
         if (!client->endpoint.quiet) {
-            printf("client sent stream=%u bytes=%d\n",
-                   kcpmux_stream_id(client_stream->stream), sent);
+            printf(
+                "client sent stream=%u bytes=%d\n",
+                kcpmux_stream_id(client_stream->stream),
+                sent);
             fflush(stdout);
         }
     }
@@ -229,8 +240,7 @@ demo_client_start_streams(demo_client_t *client)
     return 0;
 }
 
-static void
-demo_client_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
+static void demo_client_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
 {
     demo_client_stream_t *client_stream = (demo_client_stream_t *)user_data;
     (void)stream;
@@ -238,8 +248,7 @@ demo_client_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
     client_stream->readable = 1;
 }
 
-static int
-demo_client_process_reads(demo_client_t *client)
+static int demo_client_process_reads(demo_client_t *client)
 {
     uint8_t buf[4096];
 
@@ -272,12 +281,13 @@ demo_client_process_reads(demo_client_t *client)
             }
 
             remaining = client_stream->payload_len - client_stream->received_len;
-            if ((size_t)ret > remaining
-                || memcmp(client_stream->payload + client_stream->received_len,
-                          buf, (size_t)ret) != 0)
-            {
-                fprintf(stderr, "client received unexpected echo on stream=%u\n",
-                        client_stream->stream_id);
+            if ((size_t)ret > remaining ||
+                memcmp(client_stream->payload + client_stream->received_len, buf, (size_t)ret) !=
+                    0) {
+                fprintf(
+                    stderr,
+                    "client received unexpected echo on stream=%u\n",
+                    client_stream->stream_id);
                 client_stream->done = -1;
                 return -1;
             }
@@ -286,8 +296,10 @@ demo_client_process_reads(demo_client_t *client)
             if (client_stream->received_len == client_stream->payload_len) {
                 client_stream->done = 1;
                 if (!client->endpoint.quiet) {
-                    printf("client received echo stream=%u bytes=%zu\n",
-                           client_stream->stream_id, client_stream->received_len);
+                    printf(
+                        "client received echo stream=%u bytes=%zu\n",
+                        client_stream->stream_id,
+                        client_stream->received_len);
                     fflush(stdout);
                 }
             }
@@ -297,8 +309,7 @@ demo_client_process_reads(demo_client_t *client)
     return 0;
 }
 
-static int
-demo_client_done(const demo_client_t *client)
+static int demo_client_done(const demo_client_t *client)
 {
     for (unsigned i = 0; i < client->streams_count; i++) {
         if (client->streams[i].done < 0) {
@@ -311,8 +322,7 @@ demo_client_done(const demo_client_t *client)
     return 1;
 }
 
-int
-main(int argc, char **argv)
+int main(int argc, char **argv)
 {
     demo_client_t client;
     kcpmux_engine_callbacks_t callbacks;

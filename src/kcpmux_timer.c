@@ -4,23 +4,25 @@
 
 #define KCPMUX_TIMER_INVALID_INDEX ((size_t)-1)
 
-static int kcpmux_timer_less(const kcpmux_timer_node_t *left,
-                            const kcpmux_timer_node_t *right) {
+static int kcpmux_timer_less(const kcpmux_timer_node_t *left, const kcpmux_timer_node_t *right)
+{
     if (left->deadline_ms != right->deadline_ms) {
         return left->deadline_ms < right->deadline_ms;
     }
     return left->insertion_sequence < right->insertion_sequence;
 }
 
-static void kcpmux_timer_set(kcpmux_timer_manager_t *manager,
-                            size_t index,
-                            kcpmux_timer_node_t *node) {
+static void kcpmux_timer_set(
+    kcpmux_timer_manager_t *manager,
+    size_t index,
+    kcpmux_timer_node_t *node)
+{
     manager->heap[index] = node;
     node->heap_index = index;
 }
 
-static size_t kcpmux_timer_sift_up(kcpmux_timer_manager_t *manager,
-                                  size_t index) {
+static size_t kcpmux_timer_sift_up(kcpmux_timer_manager_t *manager, size_t index)
+{
     kcpmux_timer_node_t *node = manager->heap[index];
 
     while (index > 0) {
@@ -35,8 +37,8 @@ static size_t kcpmux_timer_sift_up(kcpmux_timer_manager_t *manager,
     return index;
 }
 
-static void kcpmux_timer_sift_down(kcpmux_timer_manager_t *manager,
-                                  size_t index) {
+static void kcpmux_timer_sift_down(kcpmux_timer_manager_t *manager, size_t index)
+{
     kcpmux_timer_node_t *node = manager->heap[index];
 
     for (;;) {
@@ -62,9 +64,8 @@ static void kcpmux_timer_sift_down(kcpmux_timer_manager_t *manager,
     kcpmux_timer_set(manager, index, node);
 }
 
-static kcpmux_timer_node_t *kcpmux_timer_remove_at(
-    kcpmux_timer_manager_t *manager,
-    size_t index) {
+static kcpmux_timer_node_t *kcpmux_timer_remove_at(kcpmux_timer_manager_t *manager, size_t index)
+{
     kcpmux_timer_node_t *removed = manager->heap[index];
     kcpmux_timer_node_t *last = manager->heap[--manager->size];
 
@@ -78,9 +79,8 @@ static kcpmux_timer_node_t *kcpmux_timer_remove_at(
     return removed;
 }
 
-void kcpmux_timer_node_init(kcpmux_timer_node_t *node,
-                           void *owner,
-                           kcpmux_timer_cb timeout_cb) {
+void kcpmux_timer_node_init(kcpmux_timer_node_t *node, void *owner, kcpmux_timer_cb timeout_cb)
+{
     if (!node) {
         return;
     }
@@ -93,7 +93,8 @@ void kcpmux_timer_node_init(kcpmux_timer_node_t *node,
     node->state = KCPMUX_TIMER_IDLE;
 }
 
-int kcpmux_timer_manager_init(kcpmux_timer_manager_t *manager) {
+int kcpmux_timer_manager_init(kcpmux_timer_manager_t *manager)
+{
     if (!manager) {
         return KCPMUX_ERR_INVALID_PARAM;
     }
@@ -104,7 +105,8 @@ int kcpmux_timer_manager_init(kcpmux_timer_manager_t *manager) {
     return KCPMUX_ERR_OK;
 }
 
-void kcpmux_timer_manager_destroy(kcpmux_timer_manager_t *manager) {
+void kcpmux_timer_manager_destroy(kcpmux_timer_manager_t *manager)
+{
     if (!manager) {
         return;
     }
@@ -115,8 +117,8 @@ void kcpmux_timer_manager_destroy(kcpmux_timer_manager_t *manager) {
     manager->next_sequence = 0;
 }
 
-int kcpmux_timer_manager_reserve(kcpmux_timer_manager_t *manager,
-                                size_t capacity) {
+int kcpmux_timer_manager_reserve(kcpmux_timer_manager_t *manager, size_t capacity)
+{
     kcpmux_timer_node_t **heap;
     size_t new_capacity;
 
@@ -137,8 +139,7 @@ int kcpmux_timer_manager_reserve(kcpmux_timer_manager_t *manager,
     if (new_capacity > SIZE_MAX / sizeof(*heap)) {
         return KCPMUX_ERR_OOM;
     }
-    heap = (kcpmux_timer_node_t **)realloc(
-        manager->heap, new_capacity * sizeof(*heap));
+    heap = (kcpmux_timer_node_t **)realloc(manager->heap, new_capacity * sizeof(*heap));
     if (!heap) {
         return KCPMUX_ERR_OOM;
     }
@@ -147,9 +148,11 @@ int kcpmux_timer_manager_reserve(kcpmux_timer_manager_t *manager,
     return KCPMUX_ERR_OK;
 }
 
-int kcpmux_timer_schedule(kcpmux_timer_manager_t *manager,
-                         kcpmux_timer_node_t *node,
-                         int64_t deadline_ms) {
+int kcpmux_timer_schedule(
+    kcpmux_timer_manager_t *manager,
+    kcpmux_timer_node_t *node,
+    int64_t deadline_ms)
+{
     size_t index;
     int ret;
 
@@ -178,8 +181,8 @@ int kcpmux_timer_schedule(kcpmux_timer_manager_t *manager,
     return KCPMUX_ERR_OK;
 }
 
-void kcpmux_timer_cancel(kcpmux_timer_manager_t *manager,
-                        kcpmux_timer_node_t *node) {
+void kcpmux_timer_cancel(kcpmux_timer_manager_t *manager, kcpmux_timer_node_t *node)
+{
     if (!manager || !node) {
         return;
     }
@@ -191,16 +194,16 @@ void kcpmux_timer_cancel(kcpmux_timer_manager_t *manager,
     node->state = KCPMUX_TIMER_IDLE;
 }
 
-kcpmux_timer_node_t *kcpmux_timer_peek(kcpmux_timer_manager_t *manager) {
+kcpmux_timer_node_t *kcpmux_timer_peek(kcpmux_timer_manager_t *manager)
+{
     if (!manager || manager->size == 0) {
         return NULL;
     }
     return manager->heap[0];
 }
 
-void kcpmux_timer_collect_due(kcpmux_timer_manager_t *manager,
-                             int64_t now_ms,
-                             list_head *due_list) {
+void kcpmux_timer_collect_due(kcpmux_timer_manager_t *manager, int64_t now_ms, list_head *due_list)
+{
     kcpmux_timer_node_t *node;
 
     if (!manager || !due_list) {

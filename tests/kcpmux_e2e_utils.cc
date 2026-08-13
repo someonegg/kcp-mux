@@ -9,7 +9,8 @@ namespace kcpmux_e2e {
 // Time utilities
 // ============================================================================
 
-int64_t monotonic_time_ms() {
+int64_t monotonic_time_ms()
+{
     auto now = std::chrono::steady_clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
     return ms.count();
@@ -19,7 +20,8 @@ int64_t monotonic_time_ms() {
 // KCPMUX Callbacks
 // ============================================================================
 
-void e2e_set_timer(uint64_t wake_after_ms, void *user_data) {
+void e2e_set_timer(uint64_t wake_after_ms, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     int64_t now = monotonic_time_ms();
     int64_t deadline = wake_after_ms > (uint64_t)INT64_MAX - (uint64_t)now
@@ -31,7 +33,8 @@ void e2e_set_timer(uint64_t wake_after_ms, void *user_data) {
     }
 }
 
-int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data) {
+int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     if (ep->udp_socket < 0) return 0;
 
@@ -48,8 +51,13 @@ int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *add
         dest = ep->peer_addr;
     }
 
-    ssize_t sent = sendto(ep->udp_socket, (const char *)buf, size, 0,
-                          (struct sockaddr *)&dest, sizeof(dest));
+    ssize_t sent = sendto(
+        ep->udp_socket,
+        (const char *)buf,
+        size,
+        0,
+        (struct sockaddr *)&dest,
+        sizeof(dest));
     if (sent == size) {
         ep->total_bytes_sent += sent;
         return 1;
@@ -59,13 +67,18 @@ int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *add
     return 0;
 }
 
-int64_t e2e_monotonic_time_ms(void *user_data) {
+int64_t e2e_monotonic_time_ms(void *user_data)
+{
     (void)user_data;
     return monotonic_time_ms();
 }
 
-int e2e_conn_connect_notify(kcpmux_conn_t *conn, const kcpmux_proto_ext_t *proto_ext,
-                            kcpmux_proto_ext_t *resp_proto_ext, void *user_data) {
+int e2e_conn_connect_notify(
+    kcpmux_conn_t *conn,
+    const kcpmux_proto_ext_t *proto_ext,
+    kcpmux_proto_ext_t *resp_proto_ext,
+    void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
 
     std::lock_guard<std::mutex> lock(ep->mutex);
@@ -106,14 +119,20 @@ int e2e_conn_connect_notify(kcpmux_conn_t *conn, const kcpmux_proto_ext_t *proto
     return ep->conn_notify_result;
 }
 
-void e2e_conn_state_changed(kcpmux_conn_t *conn, uint8_t old_state, uint8_t new_state, void *user_data) {
+void e2e_conn_state_changed(
+    kcpmux_conn_t *conn,
+    uint8_t old_state,
+    uint8_t new_state,
+    void *user_data)
+{
     (void)conn;
     (void)old_state;
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     ep->conn_state.store(new_state);
 }
 
-void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data) {
+void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     ep->conn_close_reason.store(reason);
     std::lock_guard<std::mutex> lock(ep->mutex);
@@ -125,7 +144,8 @@ void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data) {
         ep->accepted_conns.end());
 }
 
-int e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data) {
+int e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     uint32_t stream_id = kcpmux_stream_id(stream);
 
@@ -146,24 +166,32 @@ int e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data) {
     return 0;
 }
 
-void e2e_stream_state_changed(kcpmux_stream_t *stream, uint8_t old_state, uint8_t new_state, void *user_data) {
+void e2e_stream_state_changed(
+    kcpmux_stream_t *stream,
+    uint8_t old_state,
+    uint8_t new_state,
+    void *user_data)
+{
     (void)stream;
     (void)old_state;
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     ep->stream_state.store(new_state);
 }
 
-void e2e_stream_read_notify(kcpmux_stream_t *stream, void *user_data) {
+void e2e_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     ep->queue_stream_read(kcpmux_stream_id(stream));
 }
 
-void e2e_stream_write_notify(kcpmux_stream_t *stream, void *user_data) {
+void e2e_stream_write_notify(kcpmux_stream_t *stream, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     ep->queue_stream_write(kcpmux_stream_id(stream));
 }
 
-void e2e_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data) {
+void e2e_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data)
+{
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     uint32_t stream_id = kcpmux_stream_id(stream);
     ep->stream_close_reason.store(reason);
@@ -182,7 +210,8 @@ void e2e_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_dat
 // E2EEndpoint Implementation
 // ============================================================================
 
-bool E2EEndpoint::init(uint16_t bind_port) {
+bool E2EEndpoint::init(uint16_t bind_port)
+{
     init_sockets();
 
     udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
@@ -222,12 +251,14 @@ bool E2EEndpoint::init(uint16_t bind_port) {
     return engine != nullptr;
 }
 
-void E2EEndpoint::start() {
+void E2EEndpoint::start()
+{
     running.store(true);
     worker = std::thread(&E2EEndpoint::worker_func, this);
 }
 
-void E2EEndpoint::stop() {
+void E2EEndpoint::stop()
+{
     running.store(false);
     wake_worker();
     if (worker.joinable()) {
@@ -235,7 +266,8 @@ void E2EEndpoint::stop() {
     }
 }
 
-void E2EEndpoint::cleanup() {
+void E2EEndpoint::cleanup()
+{
     if (engine) {
         kcpmux_engine_destroy(engine);
         engine = nullptr;
@@ -254,7 +286,8 @@ void E2EEndpoint::cleanup() {
     cleanup_sockets();
 }
 
-void E2EEndpoint::queue_action(std::function<void()> action) {
+void E2EEndpoint::queue_action(std::function<void()> action)
+{
     {
         std::lock_guard<std::mutex> lock(action_mutex);
         pending_actions.push_back(std::move(action));
@@ -262,7 +295,8 @@ void E2EEndpoint::queue_action(std::function<void()> action) {
     wake_worker();
 }
 
-void E2EEndpoint::queue_stream_read(uint32_t stream_id) {
+void E2EEndpoint::queue_stream_read(uint32_t stream_id)
+{
     bool should_wake = false;
     {
         std::lock_guard<std::mutex> lock(action_mutex);
@@ -276,24 +310,33 @@ void E2EEndpoint::queue_stream_read(uint32_t stream_id) {
     if (should_wake) wake_worker();
 }
 
-void E2EEndpoint::queue_stream_write(uint32_t stream_id) {
+void E2EEndpoint::queue_stream_write(uint32_t stream_id)
+{
     queue_action([this, stream_id]() { flush_pending_send(stream_id); });
 }
 
-void E2EEndpoint::wake_worker() {
+void E2EEndpoint::wake_worker()
+{
     if (udp_socket < 0 || port == 0) return;
     const uint8_t marker = 0;
-    (void)sendto(udp_socket, (const char *)&marker, sizeof(marker), 0,
-                 (struct sockaddr *)&local_addr, sizeof(local_addr));
+    (void)sendto(
+        udp_socket,
+        (const char *)&marker,
+        sizeof(marker),
+        0,
+        (struct sockaddr *)&local_addr,
+        sizeof(local_addr));
 }
 
-void E2EEndpoint::process_due_timer(int64_t now) {
+void E2EEndpoint::process_due_timer(int64_t now)
+{
     if (next_wakeup_ms.load() > now) return;
     next_wakeup_ms.store(INT64_MAX);
     kcpmux_engine_update(engine);
 }
 
-void E2EEndpoint::process_readable_streams() {
+void E2EEndpoint::process_readable_streams()
+{
     std::set<uint32_t> stream_ids;
     {
         std::lock_guard<std::mutex> lock(action_mutex);
@@ -321,7 +364,8 @@ void E2EEndpoint::process_readable_streams() {
     }
 }
 
-void E2EEndpoint::flush_pending_send(uint32_t stream_id) {
+void E2EEndpoint::flush_pending_send(uint32_t stream_id)
+{
     for (;;) {
         kcpmux_stream_t *target = nullptr;
         std::vector<uint8_t> chunk;
@@ -341,8 +385,7 @@ void E2EEndpoint::flush_pending_send(uint32_t stream_id) {
             chunk.assign(begin, begin + chunk_size);
         }
 
-        int ret = kcpmux_stream_send(
-            target, chunk.data(), (unsigned)chunk.size(), 1);
+        int ret = kcpmux_stream_send(target, chunk.data(), (unsigned)chunk.size(), 1);
 
         std::lock_guard<std::mutex> lock(mutex);
         auto pending = pending_sends.find(stream_id);
@@ -359,7 +402,8 @@ void E2EEndpoint::flush_pending_send(uint32_t stream_id) {
     }
 }
 
-void E2EEndpoint::process_actions() {
+void E2EEndpoint::process_actions()
+{
     std::vector<std::function<void()>> actions;
     {
         std::lock_guard<std::mutex> lock(action_mutex);
@@ -370,7 +414,8 @@ void E2EEndpoint::process_actions() {
     }
 }
 
-void E2EEndpoint::worker_func() {
+void E2EEndpoint::worker_func()
+{
     uint8_t recv_buf[65536];
 
     while (running.load()) {
@@ -398,8 +443,13 @@ void E2EEndpoint::worker_func() {
         if (ret > 0 && FD_ISSET(udp_socket, &readfds)) {
             struct sockaddr_in from_addr{};
             socklen_t from_len = sizeof(from_addr);
-            ssize_t recv_len = recvfrom(udp_socket, (char *)recv_buf, sizeof(recv_buf), 0,
-                                        (struct sockaddr *)&from_addr, &from_len);
+            ssize_t recv_len = recvfrom(
+                udp_socket,
+                (char *)recv_buf,
+                sizeof(recv_buf),
+                0,
+                (struct sockaddr *)&from_addr,
+                &from_len);
             if (recv_len > 0) {
                 if (recv_len == 1 && recv_buf[0] == 0 &&
                     ntohs(from_addr.sin_port) == port) {
@@ -430,11 +480,16 @@ void E2EEndpoint::worker_func() {
     }
 }
 
-void E2EEndpoint::connect_to(const struct sockaddr_in &addr) {
+void E2EEndpoint::connect_to(const struct sockaddr_in &addr)
+{
     connect_to_with_ext(addr, nullptr, 0);
 }
 
-void E2EEndpoint::connect_to_with_ext(const struct sockaddr_in &addr, const uint8_t *ext, size_t ext_len) {
+void E2EEndpoint::connect_to_with_ext(
+    const struct sockaddr_in &addr,
+    const uint8_t *ext,
+    size_t ext_len)
+{
     peer_addr = addr;
 
     // Store extension data for later use
@@ -474,18 +529,20 @@ void E2EEndpoint::connect_to_with_ext(const struct sockaddr_in &addr, const uint
     });
 }
 
-void E2EEndpoint::create_stream() {
+void E2EEndpoint::create_stream()
+{
     stream_state.store(-1);
     queue_action([this]() {
-        if (!conn) return;
+        if (!conn)
+            return;
         kcpmux_stream_callbacks_t callbacks{};
         callbacks.stream_state_changed = e2e_stream_state_changed;
         callbacks.stream_read_notify = e2e_stream_read_notify;
         callbacks.stream_write_notify = e2e_stream_write_notify;
         callbacks.stream_close_notify = e2e_stream_close_notify;
-        kcpmux_stream_t *created = kcpmux_stream_create(
-            conn, nullptr, &callbacks, this);
-        if (!created) return;
+        kcpmux_stream_t *created = kcpmux_stream_create(conn, nullptr, &callbacks, this);
+        if (!created)
+            return;
         uint32_t stream_id = kcpmux_stream_id(created);
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -496,15 +553,18 @@ void E2EEndpoint::create_stream() {
     });
 }
 
-void E2EEndpoint::send_data(const uint8_t *data, size_t len) {
+void E2EEndpoint::send_data(const uint8_t *data, size_t len)
+{
     std::vector<uint8_t> data_copy(data, data + len);
     queue_action([this, data_copy]() {
-        if (!stream) return;
+        if (!stream)
+            return;
         kcpmux_stream_send(stream, data_copy.data(), (unsigned)data_copy.size(), 1);
     });
 }
 
-void E2EEndpoint::send_data_with_retry(const uint8_t *data, size_t len) {
+void E2EEndpoint::send_data_with_retry(const uint8_t *data, size_t len)
+{
     uint32_t stream_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -515,7 +575,10 @@ void E2EEndpoint::send_data_with_retry(const uint8_t *data, size_t len) {
 }
 
 void E2EEndpoint::send_data_on_stream_with_retry(
-        uint32_t stream_id, const uint8_t *data, size_t len) {
+    uint32_t stream_id,
+    const uint8_t *data,
+    size_t len)
+{
     if (!data || len == 0) return;
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -526,28 +589,33 @@ void E2EEndpoint::send_data_on_stream_with_retry(
     queue_action([this, stream_id]() { flush_pending_send(stream_id); });
 }
 
-bool E2EEndpoint::has_pending_send() {
+bool E2EEndpoint::has_pending_send()
+{
     std::lock_guard<std::mutex> lock(mutex);
     return !pending_sends.empty();
 }
 
-bool E2EEndpoint::has_active_stream(uint32_t stream_id) {
+bool E2EEndpoint::has_active_stream(uint32_t stream_id)
+{
     std::lock_guard<std::mutex> lock(mutex);
     return active_streams.find(stream_id) != active_streams.end();
 }
 
-kcpmux_stream_t *E2EEndpoint::get_primary_stream() {
+kcpmux_stream_t *E2EEndpoint::get_primary_stream()
+{
     std::lock_guard<std::mutex> lock(mutex);
     return stream;
 }
 
-void E2EEndpoint::reset_primary_stream() {
+void E2EEndpoint::reset_primary_stream()
+{
     std::lock_guard<std::mutex> lock(mutex);
     stream = nullptr;
     stream_state.store(-1);
 }
 
-void E2EEndpoint::close_conn() {
+void E2EEndpoint::close_conn()
+{
     queue_action([this]() {
         if (conn) {
             kcpmux_conn_close(conn);
@@ -555,7 +623,8 @@ void E2EEndpoint::close_conn() {
     });
 }
 
-void E2EEndpoint::close_stream() {
+void E2EEndpoint::close_stream()
+{
     queue_action([this]() {
         if (stream) {
             kcpmux_stream_close(stream);
@@ -563,14 +632,16 @@ void E2EEndpoint::close_stream() {
     });
 }
 
-void E2EEndpoint::clear_received_data(uint32_t stream_id) {
+void E2EEndpoint::clear_received_data(uint32_t stream_id)
+{
     std::lock_guard<std::mutex> lock(mutex);
     auto it = received_data.find(stream_id);
     if (it == received_data.end()) return;
     it->second.clear();
 }
 
-size_t E2EEndpoint::get_received_data(uint32_t stream_id, uint8_t *buf, size_t max_len) {
+size_t E2EEndpoint::get_received_data(uint32_t stream_id, uint8_t *buf, size_t max_len)
+{
     std::lock_guard<std::mutex> lock(mutex);
     auto it = received_data.find(stream_id);
     if (it == received_data.end()) return 0;
@@ -579,7 +650,8 @@ size_t E2EEndpoint::get_received_data(uint32_t stream_id, uint8_t *buf, size_t m
     return copy_len;
 }
 
-size_t E2EEndpoint::get_received_data_size(uint32_t stream_id) {
+size_t E2EEndpoint::get_received_data_size(uint32_t stream_id)
+{
     std::lock_guard<std::mutex> lock(mutex);
     auto it = received_data.find(stream_id);
     if (it == received_data.end()) return 0;
@@ -595,7 +667,8 @@ std::vector<uint8_t> E2EEndpoint::get_conn_proto_ext_received() {
 // E2EContext Implementation
 // ============================================================================
 
-void E2EContext::setup() {
+void E2EContext::setup()
+{
     // Use port 0 to let OS assign available ports
     ASSERT_TRUE(server.init(0));
     ASSERT_TRUE(client.init(0));
@@ -613,14 +686,16 @@ void E2EContext::setup() {
     client.start();
 }
 
-void E2EContext::teardown() {
+void E2EContext::teardown()
+{
     client.stop();
     server.stop();
     client.cleanup();
     server.cleanup();
 }
 
-bool E2EContext::wait_until(std::function<bool()> condition, int timeout_ms) {
+bool E2EContext::wait_until(std::function<bool()> condition, int timeout_ms)
+{
     auto start = std::chrono::steady_clock::now();
     while (!condition()) {
         auto elapsed = std::chrono::steady_clock::now() - start;
@@ -632,19 +707,29 @@ bool E2EContext::wait_until(std::function<bool()> condition, int timeout_ms) {
     return true;
 }
 
-bool E2EContext::wait_conn_state(E2EEndpoint &ep, int state, int timeout_ms) {
+bool E2EContext::wait_conn_state(E2EEndpoint &ep, int state, int timeout_ms)
+{
     return wait_until([&]() { return ep.conn_state.load() == state; }, timeout_ms);
 }
 
-bool E2EContext::wait_stream_state(E2EEndpoint &ep, int state, int timeout_ms) {
+bool E2EContext::wait_stream_state(E2EEndpoint &ep, int state, int timeout_ms)
+{
     return wait_until([&]() { return ep.stream_state.load() == state; }, timeout_ms);
 }
 
-bool E2EContext::wait_data_received(E2EEndpoint &ep, uint32_t stream_id, size_t min_bytes, int timeout_ms) {
-    return wait_until([&]() { return ep.get_received_data_size(stream_id) >= min_bytes; }, timeout_ms);
+bool E2EContext::wait_data_received(
+    E2EEndpoint &ep,
+    uint32_t stream_id,
+    size_t min_bytes,
+    int timeout_ms)
+{
+    return wait_until(
+        [&]() { return ep.get_received_data_size(stream_id) >= min_bytes; },
+        timeout_ms);
 }
 
-bool E2EContext::wait_pending_send_complete(E2EEndpoint &ep, int timeout_ms) {
+bool E2EContext::wait_pending_send_complete(E2EEndpoint &ep, int timeout_ms)
+{
     return wait_until([&]() { return !ep.has_pending_send(); }, timeout_ms);
 }
 

@@ -13,7 +13,8 @@
 
 // Connection compare function (variable length address data)
 // Returns: 1 if match, 0 if not match
-static int __conn_cmp(void *key, list_head *entry) {
+static int __conn_cmp(void *key, list_head *entry)
+{
     const kcpmux_addr_t *addr = (const kcpmux_addr_t *)key;
     kcpmux_conn_t *conn = list_entry(entry, kcpmux_conn_t, hash_node);
     if (addr->addrlen != conn->peer_addr.addrlen) {
@@ -23,15 +24,19 @@ static int __conn_cmp(void *key, list_head *entry) {
 }
 
 // Connection free function (called when hash table is destroyed)
-static void __conn_free(list_head *entry) {
+static void __conn_free(list_head *entry)
+{
     // Note: don't free conn here, let engine handle it.
     (void)entry;
 }
 
-static void kcpmux_engine_drain_pending_release(kcpmux_engine_t *engine) {
+static void kcpmux_engine_drain_pending_release(kcpmux_engine_t *engine)
+{
     while (!list_empty(&engine->pending_release_list)) {
         kcpmux_pending_release_t *item = list_first_entry(
-            &engine->pending_release_list, kcpmux_pending_release_t, node);
+            &engine->pending_release_list,
+            kcpmux_pending_release_t,
+            node);
         list_del_init(&item->node);
         if (item->release_cb) {
             item->release_cb(item);
@@ -43,12 +48,14 @@ static void kcpmux_engine_drain_pending_release(kcpmux_engine_t *engine) {
 // Configuration init
 // ============================================================================
 
-void kcpmux_engine_config_init(kcpmux_engine_config_t *config) {
+void kcpmux_engine_config_init(kcpmux_engine_config_t *config)
+{
     if (!config) return;
     memset(config, 0, sizeof(*config));
 }
 
-void kcpmux_conn_config_init(kcpmux_conn_config_t *config) {
+void kcpmux_conn_config_init(kcpmux_conn_config_t *config)
+{
     if (!config) return;
     config->ctrl_timeout_ms       = KCPMUX_DEFAULT_CONTROL_TIMEOUT_MS;
     config->connect_retries       = KCPMUX_DEFAULT_CONNECT_RETRIES;
@@ -58,7 +65,8 @@ void kcpmux_conn_config_init(kcpmux_conn_config_t *config) {
     config->idle_timeout_ms       = KCPMUX_DEFAULT_IDLE_TIMEOUT_MS;
 }
 
-void kcpmux_stream_config_init(kcpmux_stream_config_t *config) {
+void kcpmux_stream_config_init(kcpmux_stream_config_t *config)
+{
     if (!config) return;
     config->ctrl_timeout_ms       = KCPMUX_DEFAULT_SCONTROL_TIMEOUT_MS;
     config->close_retries         = KCPMUX_DEFAULT_SCLOSE_RETRIES;
@@ -77,7 +85,7 @@ kcpmux_engine_t *kcpmux_engine_create(
     const kcpmux_stream_config_t *default_stream_config,
     const kcpmux_engine_callbacks_t *callbacks,
     void *user_data,
-    const kcpmux_kcp_ops_t * kcp_ops)
+    const kcpmux_kcp_ops_t *kcp_ops)
 {
     if (!callbacks) return NULL;
 
@@ -134,7 +142,8 @@ kcpmux_engine_t *kcpmux_engine_create(
     return engine;
 }
 
-void kcpmux_engine_destroy(kcpmux_engine_t *engine) {
+void kcpmux_engine_destroy(kcpmux_engine_t *engine)
+{
     if (!engine) return;
 
     engine->destroying = 1;
@@ -165,8 +174,7 @@ void kcpmux_engine_destroy(kcpmux_engine_t *engine) {
     free(engine);
 }
 
-void kcpmux_engine_set_config(kcpmux_engine_t *engine,
-                              const kcpmux_engine_config_t *config)
+void kcpmux_engine_set_config(kcpmux_engine_t *engine, const kcpmux_engine_config_t *config)
 {
     if (!engine || !config) return;
 
@@ -178,7 +186,8 @@ void kcpmux_engine_set_config(kcpmux_engine_t *engine,
 // Engine main loop
 // ============================================================================
 
-void kcpmux_engine_update(kcpmux_engine_t *engine) {
+void kcpmux_engine_update(kcpmux_engine_t *engine)
+{
     if (!engine) return;
     int64_t now = kcpmux_engine_now(engine);
     list_head due_list;
@@ -192,8 +201,7 @@ void kcpmux_engine_update(kcpmux_engine_t *engine) {
 
     kcpmux_engine_operation_enter(engine);
     while (!list_empty(&due_list)) {
-        kcpmux_timer_node_t *node = list_first_entry(
-            &due_list, kcpmux_timer_node_t, due_link);
+        kcpmux_timer_node_t *node = list_first_entry(&due_list, kcpmux_timer_node_t, due_link);
         list_del_init(&node->due_link);
         node->state = KCPMUX_TIMER_RUNNING;
         engine->timer_dispatch_count++;
@@ -207,9 +215,11 @@ void kcpmux_engine_update(kcpmux_engine_t *engine) {
     kcpmux_engine_operation_leave(engine);
 }
 
-int kcpmux_engine_input(kcpmux_engine_t *engine,
-                       const uint8_t *buf, unsigned size,
-                       const kcpmux_addr_t *peer_addr)
+int kcpmux_engine_input(
+    kcpmux_engine_t *engine,
+    const uint8_t *buf,
+    unsigned size,
+    const kcpmux_addr_t *peer_addr)
 {
     if (!engine || !buf || size == 0 || !peer_addr || !peer_addr->addr) return -KCPMUX_ERR_INVALID_PARAM;
 
@@ -221,8 +231,7 @@ int kcpmux_engine_input(kcpmux_engine_t *engine,
 
     // Find or create connection to handle packet
     // Implementation is in kcpmux_protocol.c
-    int ret = kcpmux_protocol_input(
-        engine, buf, size, peer_addr, kcpmux_engine_now(engine));
+    int ret = kcpmux_protocol_input(engine, buf, size, peer_addr, kcpmux_engine_now(engine));
     kcpmux_engine_operation_leave(engine);
     return ret;
 }
@@ -231,17 +240,20 @@ int kcpmux_engine_input(kcpmux_engine_t *engine,
 // Engine helper functions
 // ============================================================================
 
-int64_t kcpmux_engine_now(kcpmux_engine_t *engine) {
+int64_t kcpmux_engine_now(kcpmux_engine_t *engine)
+{
     return engine ? engine->callbacks.monotonic_time_ms(engine->user_data) : 0;
 }
 
-void kcpmux_engine_operation_enter(kcpmux_engine_t *engine) {
+void kcpmux_engine_operation_enter(kcpmux_engine_t *engine)
+{
     if (engine) {
         engine->operation_depth++;
     }
 }
 
-void kcpmux_engine_operation_leave(kcpmux_engine_t *engine) {
+void kcpmux_engine_operation_leave(kcpmux_engine_t *engine)
+{
     if (!engine || engine->operation_depth == 0) {
         return;
     }
@@ -257,9 +269,11 @@ void kcpmux_engine_operation_leave(kcpmux_engine_t *engine) {
     kcpmux_engine_rearm_timer(engine, kcpmux_engine_now(engine));
 }
 
-void kcpmux_engine_queue_release(kcpmux_engine_t *engine,
-                                kcpmux_pending_release_t *item,
-                                kcpmux_release_cb release_cb) {
+void kcpmux_engine_queue_release(
+    kcpmux_engine_t *engine,
+    kcpmux_pending_release_t *item,
+    kcpmux_release_cb release_cb)
+{
     if (!engine || !item || !release_cb) {
         return;
     }
@@ -267,10 +281,12 @@ void kcpmux_engine_queue_release(kcpmux_engine_t *engine,
     list_add_tail(&item->node, &engine->pending_release_list);
 }
 
-int kcpmux_engine_register_timer_node(kcpmux_engine_t *engine,
-                                     kcpmux_timer_node_t *node,
-                                     void *owner,
-                                     kcpmux_timer_cb timeout_cb) {
+int kcpmux_engine_register_timer_node(
+    kcpmux_engine_t *engine,
+    kcpmux_timer_node_t *node,
+    void *owner,
+    kcpmux_timer_cb timeout_cb)
+{
     int ret;
     size_t required_capacity;
 
@@ -283,8 +299,7 @@ int kcpmux_engine_register_timer_node(kcpmux_engine_t *engine,
     // Scheduling a successfully registered owner must not be the first
     // operation that needs to grow the heap.
     required_capacity = engine->timer_node_count + 1;
-    ret = kcpmux_timer_manager_reserve(&engine->timer_manager,
-                                      required_capacity);
+    ret = kcpmux_timer_manager_reserve(&engine->timer_manager, required_capacity);
     if (ret != KCPMUX_ERR_OK) {
         return ret;
     }
@@ -293,8 +308,8 @@ int kcpmux_engine_register_timer_node(kcpmux_engine_t *engine,
     return KCPMUX_ERR_OK;
 }
 
-void kcpmux_engine_unregister_timer_node(kcpmux_engine_t *engine,
-                                        kcpmux_timer_node_t *node) {
+void kcpmux_engine_unregister_timer_node(kcpmux_engine_t *engine, kcpmux_timer_node_t *node)
+{
     int64_t now;
 
     if (!engine || !node || !node->owner) {
@@ -310,10 +325,12 @@ void kcpmux_engine_unregister_timer_node(kcpmux_engine_t *engine,
     kcpmux_engine_rearm_timer(engine, now);
 }
 
-int kcpmux_engine_schedule_timer_node(kcpmux_engine_t *engine,
-                                     kcpmux_timer_node_t *node,
-                                     int64_t deadline_ms,
-                                     int64_t now_ms) {
+int kcpmux_engine_schedule_timer_node(
+    kcpmux_engine_t *engine,
+    kcpmux_timer_node_t *node,
+    int64_t deadline_ms,
+    int64_t now_ms)
+{
     int ret;
 
     if (!engine || !node || !node->owner) {
@@ -329,9 +346,11 @@ int kcpmux_engine_schedule_timer_node(kcpmux_engine_t *engine,
     return ret;
 }
 
-void kcpmux_engine_cancel_timer_node(kcpmux_engine_t *engine,
-                                    kcpmux_timer_node_t *node,
-                                    int64_t now_ms) {
+void kcpmux_engine_cancel_timer_node(
+    kcpmux_engine_t *engine,
+    kcpmux_timer_node_t *node,
+    int64_t now_ms)
+{
     if (!engine || !node) {
         return;
     }
@@ -339,7 +358,8 @@ void kcpmux_engine_cancel_timer_node(kcpmux_engine_t *engine,
     kcpmux_engine_rearm_timer(engine, now_ms);
 }
 
-void kcpmux_engine_rearm_timer(kcpmux_engine_t *engine, int64_t now_ms) {
+void kcpmux_engine_rearm_timer(kcpmux_engine_t *engine, int64_t now_ms)
+{
     kcpmux_timer_node_t *root;
     int64_t deadline_ms;
     uint64_t delay_ms;
@@ -369,9 +389,11 @@ void kcpmux_engine_rearm_timer(kcpmux_engine_t *engine, int64_t now_ms) {
     engine->callbacks.set_timer(delay_ms, engine->user_data);
 }
 
-int kcpmux_engine_write_socket(kcpmux_engine_t *engine,
-                              const uint8_t *buf, unsigned size,
-                              const kcpmux_addr_t *addr)
+int kcpmux_engine_write_socket(
+    kcpmux_engine_t *engine,
+    const uint8_t *buf,
+    unsigned size,
+    const kcpmux_addr_t *addr)
 {
     if (!engine || !engine->callbacks.write_socket) return -KCPMUX_ERR_INVALID_PARAM;
 
@@ -388,7 +410,8 @@ int kcpmux_engine_write_socket(kcpmux_engine_t *engine,
     return ret ? 0 : -KCPMUX_ERR_NETWORK;
 }
 
-void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn) {
+void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn)
+{
     if (!engine || !conn || conn->internal_closed || conn->in_engine_map) return;
 
     uint32_t hash = kcpmux_hash32(conn->peer_addr.addr, conn->peer_addr.addrlen);
@@ -400,7 +423,8 @@ void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn) {
     engine->stats.conn_count = engine->conn_count;
 }
 
-void kcpmux_engine_remove_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn) {
+void kcpmux_engine_remove_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn)
+{
     if (!engine || !conn || !conn->in_engine_map) return;
 
     kcpmux_htb_del(engine->conn_map, &conn->hash_node);
@@ -411,9 +435,7 @@ void kcpmux_engine_remove_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn) {
     engine->stats.conn_count = engine->conn_count;
 }
 
-kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(
-    kcpmux_engine_t *engine,
-    const kcpmux_addr_t *addr)
+kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(kcpmux_engine_t *engine, const kcpmux_addr_t *addr)
 {
     if (!engine || !addr || !addr->addr) return NULL;
 
@@ -424,7 +446,8 @@ kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(
     return list_entry(node, kcpmux_conn_t, hash_node);
 }
 
-void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *stats) {
+void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *stats)
+{
     if (!stats) return;
 
     if (!engine) {

@@ -8,64 +8,48 @@
 extern "C" {
 #endif
 
-// ============================================================================
-// Configuration init functions
-// ============================================================================
+// Configuration defaults.
 
 void kcpmux_engine_config_init(kcpmux_engine_config_t *config);
 void kcpmux_conn_config_init(kcpmux_conn_config_t *config);
 void kcpmux_stream_config_init(kcpmux_stream_config_t *config);
 
-// ============================================================================
 // Engine API
-// ============================================================================
 
-// Create engine
 kcpmux_engine_t *kcpmux_engine_create(
     const kcpmux_engine_config_t *config,
     const kcpmux_conn_config_t *default_conn_config,
     const kcpmux_stream_config_t *default_stream_config,
     const kcpmux_engine_callbacks_t *callbacks,
     void *user_data,
-    const kcpmux_kcp_ops_t * kcp_ops);
+    const kcpmux_kcp_ops_t *kcp_ops);
 
-// Destroy engine (cascade close and release all connections)
+// Cascades close and release to all owned connections and streams.
 void kcpmux_engine_destroy(kcpmux_engine_t *engine);
 
-// Set engine configuration
-void kcpmux_engine_set_config(kcpmux_engine_t *engine,
-                              const kcpmux_engine_config_t *config);
+void kcpmux_engine_set_config(kcpmux_engine_t *engine, const kcpmux_engine_config_t *config);
 
-// Process received UDP packet
-// Return: 0 on success, < 0 on error
-int kcpmux_engine_input(kcpmux_engine_t *engine,
-                       const uint8_t *buf, unsigned size,
-                       const kcpmux_addr_t *peer_addr);
+// Processes one UDP packet. Returns 0 on success or a negative error code.
+int kcpmux_engine_input(
+    kcpmux_engine_t *engine,
+    const uint8_t *buf,
+    unsigned size,
+    const kcpmux_addr_t *peer_addr);
 
-// Dispatch timer work due at the callback time. The host should call this from
-// the replaceable one-shot timer requested through set_timer, not periodically.
+// Dispatches work due when the replaceable one-shot timer fires.
 void kcpmux_engine_update(kcpmux_engine_t *engine);
 
-// Find connection by address
-kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(
-    kcpmux_engine_t *engine,
-    const kcpmux_addr_t *addr);
+kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(kcpmux_engine_t *engine, const kcpmux_addr_t *addr);
 
-// Get engine statistics
 void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *stats);
 
-// ============================================================================
 // Connection API
-// ============================================================================
 
 // Engines own connections, and connections own streams. Once an object reaches
-// CLOSED or ERROR, it is removed from lookup and released automatically. A
-// terminal handle passed to a close callback becomes invalid when that callback
-// returns; handles must never be used after their object terminates.
-// Unless explicitly allowed by the callback declaration, callbacks must not
-// call kcpmux_* APIs; enqueue work for a later event-loop turn instead.
+// CLOSED or ERROR, it is removed and released automatically. A terminal handle
+// becomes invalid when its close callback returns. Unless explicitly allowed by
+// the callback declaration, callbacks must defer kcpmux_* calls to a later loop.
 
-// Initiate connection
 kcpmux_conn_t *kcpmux_conn_connect(
     kcpmux_engine_t *engine,
     const kcpmux_addr_t *peer_addr,
@@ -74,108 +58,71 @@ kcpmux_conn_t *kcpmux_conn_connect(
     const kcpmux_conn_callbacks_t *callbacks,
     void *user_data);
 
-// Start closing a connection (terminal close cascades to all streams).
-// Return: 0 on success, < 0 on error
+// Starts a terminal close that cascades to all streams. Returns 0 on success or
+// a negative error code.
 int kcpmux_conn_close(kcpmux_conn_t *conn);
 
-// Set connection configuration
-void kcpmux_conn_set_config(kcpmux_conn_t *conn,
-                           const kcpmux_conn_config_t *config);
+void kcpmux_conn_set_config(kcpmux_conn_t *conn, const kcpmux_conn_config_t *config);
 
-// Set callbacks and user data
-void kcpmux_conn_set_callbacks(kcpmux_conn_t *conn,
-                              const kcpmux_conn_callbacks_t *callbacks,
-                              void *user_data);
+void kcpmux_conn_set_callbacks(
+    kcpmux_conn_t *conn,
+    const kcpmux_conn_callbacks_t *callbacks,
+    void *user_data);
 
-// Get connection state
 uint8_t kcpmux_conn_get_state(kcpmux_conn_t *conn);
 
-// Get owning engine
 kcpmux_engine_t *kcpmux_conn_get_engine(kcpmux_conn_t *conn);
 
-// Get peer address
 const kcpmux_addr_t *kcpmux_conn_get_peer_addr(kcpmux_conn_t *conn);
 
-// Get user data
 void *kcpmux_conn_get_user_data(kcpmux_conn_t *conn);
 
-// Get peer protocol extension data
 const kcpmux_proto_ext_t *kcpmux_conn_get_peer_proto_ext(kcpmux_conn_t *conn);
 
-// Get self protocol extension data
 const kcpmux_proto_ext_t *kcpmux_conn_get_self_proto_ext(kcpmux_conn_t *conn);
 
-// Get connection statistics
 void kcpmux_conn_get_stats(kcpmux_conn_t *conn, kcpmux_conn_stats_t *stats);
 
-// ============================================================================
 // Stream API
-// ============================================================================
 
-// Create stream
 kcpmux_stream_t *kcpmux_stream_create(
     kcpmux_conn_t *conn,
     const kcpmux_stream_config_t *config,
     const kcpmux_stream_callbacks_t *callbacks,
     void *user_data);
 
-// Start closing a stream.
-// Return: 0 on success, < 0 on error
+// Starts a terminal close. Returns 0 on success or a negative error code.
 int kcpmux_stream_close(kcpmux_stream_t *stream);
 
-// Set stream configuration
-void kcpmux_stream_set_config(kcpmux_stream_t *stream,
-                             const kcpmux_stream_config_t *config);
+void kcpmux_stream_set_config(kcpmux_stream_t *stream, const kcpmux_stream_config_t *config);
 
-// Set callbacks and user data
-void kcpmux_stream_set_callbacks(kcpmux_stream_t *stream,
-                                const kcpmux_stream_callbacks_t *callbacks,
-                                void *user_data);
+void kcpmux_stream_set_callbacks(
+    kcpmux_stream_t *stream,
+    const kcpmux_stream_callbacks_t *callbacks,
+    void *user_data);
 
-// Send data. A call larger than kcp_mss is split into multiple KCP messages,
-// each no larger than kcp_mss.
-// Parameters:
-//   flush - if non-zero, flush immediately; otherwise, flushed periodically by KCP update
-// Returns:
-//   > 0: number of bytes sent
-//   = 0: send buffer full (write blocked), wait for stream_write_notify callback
-//   < 0: error code (KCPMUX_ERR_CLOSED, KCPMUX_ERR_STATE, etc.)
-int kcpmux_stream_send(kcpmux_stream_t *stream,
-                      const uint8_t *buf, unsigned size,
-                      int flush);
+// Sends data, splitting input larger than kcp_mss into multiple KCP messages.
+// A nonzero flush requests immediate output. Returns bytes sent, 0 when write
+// blocked, or a negative error code.
+int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int flush);
 
-// Return the size of the next complete KCP message without consuming it.
-// Returns:
-//   > 0: size of the next message
-//   = 0: no complete message available
-//   < 0: error code (KCPMUX_ERR_CLOSED, KCPMUX_ERR_STATE, etc.)
+// Returns the next complete message size, 0 if unavailable, or a negative error.
 int kcpmux_stream_peek_size(kcpmux_stream_t *stream);
 
-// Receive one complete KCP message. The buffer must be large enough for the
-// next message; use kcpmux_stream_peek_size() to determine the required size.
-// Returns:
-//   > 0: number of bytes received
-//   = 0: no complete message available, wait for stream_read_notify callback
-//   < 0: error code (KCPMUX_ERR_BUFFER_TOO_SMALL, KCPMUX_ERR_CLOSED, etc.)
-int kcpmux_stream_recv(kcpmux_stream_t *stream,
-                      uint8_t *buf, unsigned size);
+// Receives one complete message. Use kcpmux_stream_peek_size() to size the
+// buffer. Returns bytes received, 0 if unavailable, or a negative error.
+int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size);
 
-// Get stream ID
 uint32_t kcpmux_stream_id(kcpmux_stream_t *stream);
 
-// Get stream state
 uint8_t kcpmux_stream_get_state(kcpmux_stream_t *stream);
 
-// Get stream KCP
-void* kcpmux_stream_get_kcp(kcpmux_stream_t *stream);
+void *kcpmux_stream_get_kcp(kcpmux_stream_t *stream);
 
-// Get owning connection
 kcpmux_conn_t *kcpmux_stream_get_conn(kcpmux_stream_t *stream);
 
-// Get user data
 void *kcpmux_stream_get_user_data(kcpmux_stream_t *stream);
 
-// Get stream statistics
 void kcpmux_stream_get_stats(kcpmux_stream_t *stream, kcpmux_stream_stats_t *stats);
 
 #ifdef __cplusplus

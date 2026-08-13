@@ -14,8 +14,7 @@
 
 #define DEMO_NO_WAKEUP INT64_MAX
 
-int
-demo_parse_port(const char *value, unsigned short *port)
+int demo_parse_port(const char *value, unsigned short *port)
 {
     char *end = NULL;
     long parsed;
@@ -34,8 +33,7 @@ demo_parse_port(const char *value, unsigned short *port)
     return 0;
 }
 
-int
-demo_parse_uint(const char *value, unsigned *out, unsigned min, unsigned max)
+int demo_parse_uint(const char *value, unsigned *out, unsigned min, unsigned max)
 {
     char *end = NULL;
     unsigned long parsed;
@@ -54,8 +52,7 @@ demo_parse_uint(const char *value, unsigned *out, unsigned min, unsigned max)
     return 0;
 }
 
-int64_t
-demo_monotonic_time_ms(void)
+int64_t demo_monotonic_time_ms(void)
 {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
@@ -64,9 +61,10 @@ demo_monotonic_time_ms(void)
     return (int64_t)ts.tv_sec * 1000 + (int64_t)(ts.tv_nsec / 1000000);
 }
 
-int
-demo_sockaddr_to_kcpmux_addr(const struct sockaddr_in *addr, kcpmux_addr_t *out,
-                             uint8_t out_buf[6])
+int demo_sockaddr_to_kcpmux_addr(
+    const struct sockaddr_in *addr,
+    kcpmux_addr_t *out,
+    uint8_t out_buf[6])
 {
     uint32_t ip;
     uint16_t port;
@@ -89,8 +87,7 @@ demo_sockaddr_to_kcpmux_addr(const struct sockaddr_in *addr, kcpmux_addr_t *out,
     return 0;
 }
 
-int
-demo_kcpmux_addr_to_sockaddr(const kcpmux_addr_t *addr, struct sockaddr_in *out)
+int demo_kcpmux_addr_to_sockaddr(const kcpmux_addr_t *addr, struct sockaddr_in *out)
 {
     uint32_t ip;
     uint16_t port;
@@ -112,8 +109,7 @@ demo_kcpmux_addr_to_sockaddr(const kcpmux_addr_t *addr, struct sockaddr_in *out)
     return 0;
 }
 
-static int
-demo_set_socket_buffers(int fd)
+static int demo_set_socket_buffers(int fd)
 {
     int size = DEMO_SOCKET_BUF_SIZE;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)) != 0) {
@@ -125,8 +121,7 @@ demo_set_socket_buffers(int fd)
     return 0;
 }
 
-int
-demo_udp_resolve_ipv4(const char *host, unsigned short port, struct sockaddr_in *out)
+int demo_udp_resolve_ipv4(const char *host, unsigned short port, struct sockaddr_in *out)
 {
     if (host == NULL || out == NULL) {
         return -1;
@@ -138,8 +133,7 @@ demo_udp_resolve_ipv4(const char *host, unsigned short port, struct sockaddr_in 
     return inet_pton(AF_INET, host, &out->sin_addr) == 1 ? 0 : -1;
 }
 
-int
-demo_udp_bind(int *fd, const char *host, unsigned short port)
+int demo_udp_bind(int *fd, const char *host, unsigned short port)
 {
     struct sockaddr_in addr;
     int reuse = 1;
@@ -166,8 +160,7 @@ demo_udp_bind(int *fd, const char *host, unsigned short port)
     return 0;
 }
 
-int
-demo_udp_open_client(int *fd)
+int demo_udp_open_client(int *fd)
 {
     int sock;
 
@@ -189,8 +182,7 @@ demo_udp_open_client(int *fd)
     return 0;
 }
 
-void
-demo_udp_close(int *fd)
+void demo_udp_close(int *fd)
 {
     if (fd != NULL && *fd >= 0) {
         close(*fd);
@@ -198,10 +190,10 @@ demo_udp_close(int *fd)
     }
 }
 
-int
-demo_endpoint_init(demo_endpoint_t *endpoint,
-                   kcpmux_engine_callbacks_t *callbacks,
-                   void *user_data)
+int demo_endpoint_init(
+    demo_endpoint_t *endpoint,
+    kcpmux_engine_callbacks_t *callbacks,
+    void *user_data)
 {
     if (endpoint == NULL || callbacks == NULL) {
         return -1;
@@ -218,8 +210,7 @@ demo_endpoint_init(demo_endpoint_t *endpoint,
     return endpoint->engine != NULL ? 0 : -1;
 }
 
-void
-demo_endpoint_cleanup(demo_endpoint_t *endpoint)
+void demo_endpoint_cleanup(demo_endpoint_t *endpoint)
 {
     if (endpoint == NULL) {
         return;
@@ -233,8 +224,7 @@ demo_endpoint_cleanup(demo_endpoint_t *endpoint)
     demo_udp_close(&endpoint->fd);
 }
 
-int
-demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
+int demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
 {
     uint8_t packet[DEMO_PACKET_BUF_SIZE];
     fd_set readfds;
@@ -274,8 +264,13 @@ demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
     if (ret > 0 && FD_ISSET(endpoint->fd, &readfds)) {
         struct sockaddr_in peer;
         socklen_t peer_len = (socklen_t)sizeof(peer);
-        ssize_t nread = recvfrom(endpoint->fd, packet, sizeof(packet), 0,
-                                 (struct sockaddr *)&peer, &peer_len);
+        ssize_t nread = recvfrom(
+            endpoint->fd,
+            packet,
+            sizeof(packet),
+            0,
+            (struct sockaddr *)&peer,
+            &peer_len);
         if (nread > 0) {
             uint8_t addr_buf[6];
             kcpmux_addr_t addr;
@@ -293,8 +288,7 @@ demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms)
     return 0;
 }
 
-void
-demo_set_timer(uint64_t wake_after_ms, void *user_data)
+void demo_set_timer(uint64_t wake_after_ms, void *user_data)
 {
     demo_endpoint_t *endpoint = (demo_endpoint_t *)user_data;
     if (endpoint != NULL) {
@@ -305,9 +299,7 @@ demo_set_timer(uint64_t wake_after_ms, void *user_data)
     }
 }
 
-int
-demo_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr,
-                  void *user_data)
+int demo_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data)
 {
     demo_endpoint_t *endpoint = (demo_endpoint_t *)user_data;
     struct sockaddr_in peer;
@@ -323,15 +315,13 @@ demo_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr,
     return sent == (ssize_t)size ? 1 : 0;
 }
 
-int64_t
-demo_engine_time_ms(void *user_data)
+int64_t demo_engine_time_ms(void *user_data)
 {
     (void)user_data;
     return demo_monotonic_time_ms();
 }
 
-void
-demo_log_write(int level, const char *buf, unsigned size, void *user_data)
+void demo_log_write(int level, const char *buf, unsigned size, void *user_data)
 {
     demo_endpoint_t *endpoint = (demo_endpoint_t *)user_data;
     if (endpoint != NULL && endpoint->quiet) {

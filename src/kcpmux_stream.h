@@ -51,10 +51,11 @@ struct kcpmux_stream_s {
 // ============================================================================
 
 // Create stream (internal use)
-kcpmux_stream_t *kcpmux_stream_new(kcpmux_conn_t *conn,
-                                 uint32_t stream_id,
-                                 const kcpmux_stream_config_t *config,
-                                 uint8_t is_initiator);
+kcpmux_stream_t *kcpmux_stream_new(
+    kcpmux_conn_t *conn,
+    uint32_t stream_id,
+    const kcpmux_stream_config_t *config,
+    uint8_t is_initiator);
 
 // Finalize a stream and queue its physical release.
 void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason);
@@ -70,7 +71,11 @@ void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state);
 
 // Handle received messages
 // Return: 0 on success, < 0 on error
-int kcpmux_stream_handle_payload(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int64_t recv_time_ms);
+int kcpmux_stream_handle_payload(
+    kcpmux_stream_t *stream,
+    const uint8_t *buf,
+    unsigned size,
+    int64_t recv_time_ms);
 
 // Send messages
 // Return: 0 on success, < 0 on error

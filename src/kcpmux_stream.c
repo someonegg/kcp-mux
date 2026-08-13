@@ -7,10 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node,
-                                        int64_t now_ms);
+static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms);
 
-static void kcpmux_stream_free(kcpmux_pending_release_t *item) {
+static void kcpmux_stream_free(kcpmux_pending_release_t *item)
+{
     kcpmux_stream_t *stream = list_entry(item, kcpmux_stream_t, pending_release);
     free(stream);
 }
@@ -21,7 +21,8 @@ static void kcpmux_stream_free(kcpmux_pending_release_t *item) {
 
 // KCP output callback
 // Returns: 0 on success, -1 on error
-static int __kcp_output(const char *buf, int len, void *kcp, void *user) {
+static int __kcp_output(const char *buf, int len, void *kcp, void *user)
+{
     kcpmux_stream_t *stream = (kcpmux_stream_t *)user;
     if (!stream || !stream->conn) return -1;
     if (stream->internal_closed || stream->state != KCPMUX_STREAM_STATE_OPEN ||
@@ -45,10 +46,11 @@ static int __kcp_output(const char *buf, int len, void *kcp, void *user) {
 // Stream lifecycle
 // ============================================================================
 
-kcpmux_stream_t *kcpmux_stream_new(kcpmux_conn_t *conn,
-                                 uint32_t stream_id,
-                                 const kcpmux_stream_config_t *config,
-                                 uint8_t is_initiator)
+kcpmux_stream_t *kcpmux_stream_new(
+    kcpmux_conn_t *conn,
+    uint32_t stream_id,
+    const kcpmux_stream_config_t *config,
+    uint8_t is_initiator)
 {
     if (!conn || stream_id == 0) return NULL;
 
@@ -84,9 +86,11 @@ kcpmux_stream_t *kcpmux_stream_new(kcpmux_conn_t *conn,
     ops->setmss(stream->kcp, stream->config.kcp_mss);
     ops->setoutput(stream->kcp, __kcp_output);
 
-    if (kcpmux_engine_register_timer_node(conn->engine, &stream->timer_node,
-                                         stream,
-                                         kcpmux_stream_timer_callback) != KCPMUX_ERR_OK) {
+    if (kcpmux_engine_register_timer_node(
+            conn->engine,
+            &stream->timer_node,
+            stream,
+            kcpmux_stream_timer_callback) != KCPMUX_ERR_OK) {
         ops->release(stream->kcp);
         free(stream);
         return NULL;
@@ -103,7 +107,8 @@ kcpmux_stream_t *kcpmux_stream_new(kcpmux_conn_t *conn,
     return stream;
 }
 
-void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason) {
+void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason)
+{
     if (!stream) return;
 
     // Skip if already closed
@@ -140,8 +145,7 @@ void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason) {
 
     // The terminal handle is invalid after the notification returns. Defer its
     // physical free until the enclosing engine operation completes.
-    kcpmux_engine_queue_release(
-        engine, &stream->pending_release, kcpmux_stream_free);
+    kcpmux_engine_queue_release(engine, &stream->pending_release, kcpmux_stream_free);
 }
 
 // ============================================================================
@@ -195,7 +199,8 @@ kcpmux_stream_t *kcpmux_stream_create(
     return stream;
 }
 
-int kcpmux_stream_close(kcpmux_stream_t *stream) {
+int kcpmux_stream_close(kcpmux_stream_t *stream)
+{
     if (!stream) return -KCPMUX_ERR_INVALID_PARAM;
 
     kcpmux_engine_t *engine = stream->conn->engine;
@@ -234,8 +239,7 @@ int kcpmux_stream_close(kcpmux_stream_t *stream) {
     return 0;
 }
 
-void kcpmux_stream_set_config(kcpmux_stream_t *stream,
-                             const kcpmux_stream_config_t *config)
+void kcpmux_stream_set_config(kcpmux_stream_t *stream, const kcpmux_stream_config_t *config)
 {
     if (!stream || !config || stream->internal_closed) return;
 
@@ -244,9 +248,10 @@ void kcpmux_stream_set_config(kcpmux_stream_t *stream,
     kcpmux_stream_refresh_timer(stream, kcpmux_engine_now(stream->conn->engine));
 }
 
-void kcpmux_stream_set_callbacks(kcpmux_stream_t *stream,
-                                const kcpmux_stream_callbacks_t *callbacks,
-                                void *user_data)
+void kcpmux_stream_set_callbacks(
+    kcpmux_stream_t *stream,
+    const kcpmux_stream_callbacks_t *callbacks,
+    void *user_data)
 {
     if (!stream || stream->internal_closed) return;
 
@@ -256,9 +261,7 @@ void kcpmux_stream_set_callbacks(kcpmux_stream_t *stream,
     stream->user_data = user_data;
 }
 
-int kcpmux_stream_send(kcpmux_stream_t *stream,
-                      const uint8_t *buf, unsigned size,
-                      int flush)
+int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int flush)
 {
     if (!stream || !buf || size == 0) return -KCPMUX_ERR_INVALID_PARAM;
 
@@ -331,18 +334,17 @@ int kcpmux_stream_send(kcpmux_stream_t *stream,
     if (flush) {
         ops->update(stream->kcp, now);
         int64_t deadline_ms = ops->check(stream->kcp, now);
-        (void)kcpmux_engine_schedule_timer_node(
-            engine, &stream->timer_node, deadline_ms, now);
+        (void)kcpmux_engine_schedule_timer_node(engine, &stream->timer_node, deadline_ms, now);
     } else {
-        (void)kcpmux_engine_schedule_timer_node(
-            engine, &stream->timer_node, now, now);
+        (void)kcpmux_engine_schedule_timer_node(engine, &stream->timer_node, now, now);
     }
 
     kcpmux_engine_operation_leave(engine);
     return (int)total_sent;
 }
 
-int kcpmux_stream_peek_size(kcpmux_stream_t *stream) {
+int kcpmux_stream_peek_size(kcpmux_stream_t *stream)
+{
     if (!stream) return -KCPMUX_ERR_INVALID_PARAM;
     if (stream->internal_closed) {
         return KCPMUX_ERR_CLOSED;
@@ -355,8 +357,7 @@ int kcpmux_stream_peek_size(kcpmux_stream_t *stream) {
     return ret > 0 ? ret : 0;
 }
 
-int kcpmux_stream_recv(kcpmux_stream_t *stream,
-                      uint8_t *buf, unsigned size)
+int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size)
 {
     if (!stream || !buf || size == 0) return -KCPMUX_ERR_INVALID_PARAM;
 
@@ -393,27 +394,33 @@ int kcpmux_stream_recv(kcpmux_stream_t *stream,
 // Stream query API
 // ============================================================================
 
-uint32_t kcpmux_stream_id(kcpmux_stream_t *stream) {
+uint32_t kcpmux_stream_id(kcpmux_stream_t *stream)
+{
     return stream ? stream->stream_id : 0;
 }
 
-uint8_t kcpmux_stream_get_state(kcpmux_stream_t *stream) {
+uint8_t kcpmux_stream_get_state(kcpmux_stream_t *stream)
+{
     return stream ? stream->state : KCPMUX_STREAM_STATE_ERROR;
 }
 
-void* kcpmux_stream_get_kcp(kcpmux_stream_t *stream) {
+void *kcpmux_stream_get_kcp(kcpmux_stream_t *stream)
+{
     return stream ? stream->kcp : NULL;
 }
 
-kcpmux_conn_t *kcpmux_stream_get_conn(kcpmux_stream_t *stream) {
+kcpmux_conn_t *kcpmux_stream_get_conn(kcpmux_stream_t *stream)
+{
     return stream ? stream->conn : NULL;
 }
 
-void *kcpmux_stream_get_user_data(kcpmux_stream_t *stream) {
+void *kcpmux_stream_get_user_data(kcpmux_stream_t *stream)
+{
     return stream ? stream->user_data : NULL;
 }
 
-void kcpmux_stream_get_stats(kcpmux_stream_t *stream, kcpmux_stream_stats_t *stats) {
+void kcpmux_stream_get_stats(kcpmux_stream_t *stream, kcpmux_stream_stats_t *stats)
+{
     if (!stats) return;
 
     if (!stream) {
@@ -428,7 +435,8 @@ void kcpmux_stream_get_stats(kcpmux_stream_t *stream, kcpmux_stream_stats_t *sta
 // Stream internal functions
 // ============================================================================
 
-void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state) {
+void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state)
+{
     if (!stream || stream->state == new_state) return;
 
     uint8_t old_state = stream->state;
@@ -441,7 +449,8 @@ void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state) {
     }
 }
 
-void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now) {
+void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now)
+{
     if (!stream || stream->internal_closed || stream->conn->internal_closed ||
         stream->conn->state != KCPMUX_CONN_STATE_CONNECTED) return;
 
@@ -471,16 +480,17 @@ void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now) {
 
             int64_t deadline_ms = ops->check(stream->kcp, now);
             (void)kcpmux_engine_schedule_timer_node(
-                stream->conn->engine, &stream->timer_node,
-                deadline_ms, now);
+                stream->conn->engine,
+                &stream->timer_node,
+                deadline_ms,
+                now);
         }
         break;
 
     case KCPMUX_STREAM_STATE_CLOSING:
         // Check close timeout and retransmit
-        if (now >= kcpmux_timer_deadline_after(
-                       stream->last_ctrl_ts,
-                       stream->config.ctrl_timeout_ms)) {
+        if (now >=
+            kcpmux_timer_deadline_after(stream->last_ctrl_ts, stream->config.ctrl_timeout_ms)) {
             if (stream->retry_count < stream->config.close_retries) {
                 stream->retry_count++;
                 kcpmux_stream_send_close(stream, stream->close_reason);
@@ -496,13 +506,13 @@ void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now) {
         break;
 
     default:
-        kcpmux_engine_cancel_timer_node(stream->conn->engine,
-                                       &stream->timer_node, now);
+        kcpmux_engine_cancel_timer_node(stream->conn->engine, &stream->timer_node, now);
         break;
     }
 }
 
-void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now) {
+void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now)
+{
     int64_t deadline_ms;
 
     if (!stream || !stream->conn ||
@@ -510,14 +520,12 @@ void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now) {
         return;
     }
     if (stream->internal_closed) {
-        kcpmux_engine_cancel_timer_node(stream->conn->engine,
-                                       &stream->timer_node, now);
+        kcpmux_engine_cancel_timer_node(stream->conn->engine, &stream->timer_node, now);
         return;
     }
     if (stream->conn->internal_closed ||
         stream->conn->state != KCPMUX_CONN_STATE_CONNECTED) {
-        kcpmux_engine_cancel_timer_node(stream->conn->engine,
-                                       &stream->timer_node, now);
+        kcpmux_engine_cancel_timer_node(stream->conn->engine, &stream->timer_node, now);
         return;
     }
     switch (stream->state) {
@@ -527,20 +535,23 @@ void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now) {
 
     case KCPMUX_STREAM_STATE_CLOSING:
         deadline_ms = kcpmux_timer_deadline_after(
-            stream->last_ctrl_ts, stream->config.ctrl_timeout_ms);
+            stream->last_ctrl_ts,
+            stream->config.ctrl_timeout_ms);
         break;
 
     default:
-        kcpmux_engine_cancel_timer_node(stream->conn->engine,
-                                       &stream->timer_node, now);
+        kcpmux_engine_cancel_timer_node(stream->conn->engine, &stream->timer_node, now);
         return;
     }
     (void)kcpmux_engine_schedule_timer_node(
-        stream->conn->engine, &stream->timer_node, deadline_ms, now);
+        stream->conn->engine,
+        &stream->timer_node,
+        deadline_ms,
+        now);
 }
 
-static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node,
-                                        int64_t now_ms) {
+static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms)
+{
     kcpmux_stream_t *stream = node ? (kcpmux_stream_t *)node->owner : NULL;
     kcpmux_stream_update(stream, now_ms);
 }
@@ -549,7 +560,12 @@ static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node,
 // Message handling
 // ============================================================================
 
-int kcpmux_stream_handle_payload(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int64_t recv_time_ms) {
+int kcpmux_stream_handle_payload(
+    kcpmux_stream_t *stream,
+    const uint8_t *buf,
+    unsigned size,
+    int64_t recv_time_ms)
+{
     if (!stream || !buf || size == 0) return -KCPMUX_ERR_INVALID_PARAM;
 
     if (stream->internal_closed) {
@@ -570,8 +586,10 @@ int kcpmux_stream_handle_payload(kcpmux_stream_t *stream, const uint8_t *buf, un
     int ret = ops->input(stream->kcp, (const char *)buf, (long)size);
     // input() may partially mutate a custom KCP implementation even on error.
     (void)kcpmux_engine_schedule_timer_node(
-        stream->conn->engine, &stream->timer_node,
-        recv_time_ms, recv_time_ms);
+        stream->conn->engine,
+        &stream->timer_node,
+        recv_time_ms,
+        recv_time_ms);
     if (ret < 0) {
         return KCPMUX_ERR_KCPRET(ret);
     }
@@ -602,7 +620,8 @@ int kcpmux_stream_handle_payload(kcpmux_stream_t *stream, const uint8_t *buf, un
 // Message send (implemented in kcpmux_protocol.c)
 // ============================================================================
 
-int kcpmux_stream_send_close(kcpmux_stream_t *stream, uint8_t reason) {
+int kcpmux_stream_send_close(kcpmux_stream_t *stream, uint8_t reason)
+{
     if (!stream || stream->internal_closed) return KCPMUX_ERR_CLOSED;
     int64_t now = kcpmux_engine_now(stream->conn->engine);
     stream->last_ctrl_ts = now;
@@ -611,6 +630,7 @@ int kcpmux_stream_send_close(kcpmux_stream_t *stream, uint8_t reason) {
     return ret;
 }
 
-int kcpmux_stream_send_close_ack(kcpmux_stream_t *stream, uint8_t reason) {
+int kcpmux_stream_send_close_ack(kcpmux_stream_t *stream, uint8_t reason)
+{
     return kcpmux_protocol_send_stream_close_ack(stream, reason);
 }

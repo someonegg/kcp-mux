@@ -25,10 +25,12 @@
 
 // Process input packet
 // Return: 0 on success, < 0 on error
-int kcpmux_protocol_input(kcpmux_engine_t *engine,
-                         const uint8_t *buf, unsigned size,
-                         const kcpmux_addr_t *peer_addr,
-                         int64_t recv_time_ms);
+int kcpmux_protocol_input(
+    kcpmux_engine_t *engine,
+    const uint8_t *buf,
+    unsigned size,
+    const kcpmux_addr_t *peer_addr,
+    int64_t recv_time_ms);
 
 // ============================================================================
 // Message send functions

@@ -14,7 +14,8 @@ using namespace kcpmux_test;
 // Helper: pump KCP to exchange packets between engines
 // ============================================================================
 
-static inline void pump_kcp(DualEngineContext &ctx) {
+static inline void pump_kcp(DualEngineContext &ctx)
+{
     kcpmux_engine_update(ctx.client_engine);
     kcpmux_engine_update(ctx.server_engine);
     ctx.deliver_all();
@@ -37,11 +38,17 @@ protected:
     }
 
     // Establish connection between client and server
-    void establish_connection() {
+    void establish_connection()
+    {
         // Client connects to server
         auto client_conn_callbacks = create_conn_callbacks(&ctx.client_ctx);
-        client_conn = kcpmux_conn_connect(ctx.client_engine, ctx.server_addr.get(),
-                                         nullptr, nullptr, &client_conn_callbacks, &ctx.client_ctx);
+        client_conn = kcpmux_conn_connect(
+            ctx.client_engine,
+            ctx.server_addr.get(),
+            nullptr,
+            nullptr,
+            &client_conn_callbacks,
+            &ctx.client_ctx);
         ASSERT_NE(client_conn, nullptr);
 
         // Exchange CONN_CONNECT packet
@@ -62,11 +69,18 @@ protected:
     }
 
     // Create stream on both client and server
-    void create_streams(const kcpmux_stream_config_t *stream_config, kcpmux_stream_t *&client_stream, kcpmux_stream_t *&server_stream) {
+    void create_streams(
+        const kcpmux_stream_config_t *stream_config,
+        kcpmux_stream_t *&client_stream,
+        kcpmux_stream_t *&server_stream)
+    {
         // Client creates stream
         auto client_stream_callbacks = create_stream_callbacks(&ctx.client_ctx);
-        client_stream = kcpmux_stream_create(client_conn, stream_config,
-                                            &client_stream_callbacks, &ctx.client_ctx);
+        client_stream = kcpmux_stream_create(
+            client_conn,
+            stream_config,
+            &client_stream_callbacks,
+            &ctx.client_ctx);
         ASSERT_NE(client_stream, nullptr);
         EXPECT_EQ(kcpmux_stream_get_state(client_stream), KCPMUX_STREAM_STATE_OPEN);
 
@@ -99,10 +113,12 @@ protected:
         EXPECT_EQ(kcpmux_stream_get_state(server_stream), KCPMUX_STREAM_STATE_OPEN);
     }
 
-    void create_streams(const kcpmux_stream_config_t *stream_config = nullptr) {
+    void create_streams(const kcpmux_stream_config_t *stream_config = nullptr)
+    {
         create_streams(stream_config, client_stream, server_stream);
     }
-    void create_streams2(const kcpmux_stream_config_t *stream_config = nullptr) {
+    void create_streams2(const kcpmux_stream_config_t *stream_config = nullptr)
+    {
         create_streams(stream_config, client_stream2, server_stream2);
     }
 
@@ -126,9 +142,11 @@ TEST_F(kcpmux_data, send_recv_small_data) {
 
     // Send small data from client to server
     std::string send_data = "Hello, kcpmux!";
-    int ret = kcpmux_stream_send(client_stream,
-                               (const uint8_t*)send_data.c_str(),
-                               send_data.size(), 1);  // flush immediately
+    int ret = kcpmux_stream_send(
+        client_stream,
+        (const uint8_t *)send_data.c_str(),
+        send_data.size(),
+        1); // flush immediately
     ASSERT_GT(ret, 0);
 
     // Pump KCP to route data packet
@@ -185,14 +203,10 @@ TEST_F(kcpmux_data, send_recv_bidirectional) {
     std::string server_data = "Server->Client";
 
     // Client sends
-    kcpmux_stream_send(client_stream,
-                     (const uint8_t*)client_data.c_str(),
-                     client_data.size(), 1);
+    kcpmux_stream_send(client_stream, (const uint8_t *)client_data.c_str(), client_data.size(), 1);
 
     // Server sends
-    kcpmux_stream_send(server_stream,
-                     (const uint8_t*)server_data.c_str(),
-                     server_data.size(), 1);
+    kcpmux_stream_send(server_stream, (const uint8_t *)server_data.c_str(), server_data.size(), 1);
 
     // Pump KCP
     pump_kcp(ctx);
@@ -255,9 +269,7 @@ TEST_F(kcpmux_data, read_notify_triggered) {
 
     // Client sends data
     std::string send_data = "Hello, Server!";
-    kcpmux_stream_send(client_stream,
-                     (const uint8_t*)send_data.c_str(),
-                     send_data.size(), 1);
+    kcpmux_stream_send(client_stream, (const uint8_t *)send_data.c_str(), send_data.size(), 1);
 
     // Pump KCP
     pump_kcp(ctx);
@@ -293,9 +305,11 @@ TEST_F(kcpmux_data, send_on_non_open_stream) {
 
     // Try to send on non-OPEN stream
     std::string send_data = "Should fail";
-    int ret = kcpmux_stream_send(client_stream,
-                               (const uint8_t*)send_data.c_str(),
-                               send_data.size(), 1);
+    int ret = kcpmux_stream_send(
+        client_stream,
+        (const uint8_t *)send_data.c_str(),
+        send_data.size(),
+        1);
     EXPECT_EQ(ret, KCPMUX_ERR_STATE);  // Should return state error
 }
 
@@ -381,17 +395,13 @@ TEST_F(kcpmux_data, send_blocks_when_buffer_full) {
     std::string chunk = "TestData123456789";  // Enough data to create multiple KCP segments
 
     // First send should succeed
-    int ret = kcpmux_stream_send(client_stream,
-                               (const uint8_t*)chunk.c_str(),
-                               chunk.size(), 1);
+    int ret = kcpmux_stream_send(client_stream, (const uint8_t *)chunk.c_str(), chunk.size(), 1);
     EXPECT_GT(ret, 0);
 
     // Keep sending until buffer is full (returns 0)
     int send_count = 1;
     while (send_count < 100) {  // Prevent infinite loop
-        ret = kcpmux_stream_send(client_stream,
-                               (const uint8_t*)chunk.c_str(),
-                               chunk.size(), 1);
+        ret = kcpmux_stream_send(client_stream, (const uint8_t *)chunk.c_str(), chunk.size(), 1);
         if (ret == 0) {
             // Buffer is full
             break;
@@ -415,15 +425,17 @@ TEST_F(kcpmux_data, send_resumes_after_ack) {
     create_streams(&stream_config);
 
     // Send large chunks to ensure blocking
-    std::string chunk(200, 'X');  // Large chunk to create KCP segments
+    std::string chunk(200, 'X'); // Large chunk to create KCP segments
     int blocked = 0;
     int total_sent = 0;
 
     // Send until blocked
     for (int i = 0; i < 10; i++) {
-        int ret = kcpmux_stream_send(client_stream,
-                                   (const uint8_t*)chunk.c_str(),
-                                   chunk.size(), 0);
+        int ret = kcpmux_stream_send(
+            client_stream,
+            (const uint8_t *)chunk.c_str(),
+            chunk.size(),
+            0);
         if (ret > 0) {
             total_sent += ret;
         } else if (ret == 0) {
@@ -452,9 +464,7 @@ TEST_F(kcpmux_data, send_resumes_after_ack) {
     EXPECT_EQ(total_recv, chunk.size() * 6);
 
     // Send should work again (buffer should have been freed by ACKs)
-    int ret = kcpmux_stream_send(client_stream,
-                               (const uint8_t*)chunk.c_str(),
-                               chunk.size(), 1);
+    int ret = kcpmux_stream_send(client_stream, (const uint8_t *)chunk.c_str(), chunk.size(), 1);
     EXPECT_GT(ret, 0);  // Should be able to send again
 }
 
@@ -474,9 +484,11 @@ TEST_F(kcpmux_data, write_notify_triggered) {
     // Send data until blocked
     std::string chunk = "DataChunk1234567";
     for (int i = 0; i < 20; i++) {
-        int ret = kcpmux_stream_send(client_stream,
-                                   (const uint8_t*)chunk.c_str(),
-                                   chunk.size(), 0);
+        int ret = kcpmux_stream_send(
+            client_stream,
+            (const uint8_t *)chunk.c_str(),
+            chunk.size(),
+            0);
         if (ret == 0) break;
     }
 

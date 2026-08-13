@@ -39,16 +39,30 @@ namespace kcpmux_e2e {
 // ============================================================================
 
 #ifdef _WIN32
-inline int close_socket(int fd) { return closesocket(fd); }
-inline void init_sockets() {
+inline int close_socket(int fd)
+{
+    return closesocket(fd);
+}
+inline void init_sockets()
+{
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 }
-inline void cleanup_sockets() { WSACleanup(); }
+inline void cleanup_sockets()
+{
+    WSACleanup();
+}
 #else
-inline int close_socket(int fd) { return close(fd); }
-inline void init_sockets() {}
-inline void cleanup_sockets() {}
+inline int close_socket(int fd)
+{
+    return close(fd);
+}
+inline void init_sockets()
+{
+}
+inline void cleanup_sockets()
+{
+}
 #endif
 
 // ============================================================================
@@ -128,9 +142,8 @@ struct E2EEndpoint {
     void connect_to_with_ext(const struct sockaddr_in &addr, const uint8_t *ext, size_t ext_len);
     void create_stream();
     void send_data(const uint8_t *data, size_t len);
-    void send_data_with_retry(const uint8_t *data, size_t len);  // Handles write block
-    void send_data_on_stream_with_retry(uint32_t stream_id,
-                                        const uint8_t *data, size_t len);
+    void send_data_with_retry(const uint8_t *data, size_t len); // Handles write block
+    void send_data_on_stream_with_retry(uint32_t stream_id, const uint8_t *data, size_t len);
     void close_conn();
     void close_stream();
     void queue_action(std::function<void()> action);
@@ -150,18 +163,18 @@ struct E2EEndpoint {
     std::vector<uint8_t> get_conn_proto_ext_received();
 
 private:
-    void worker_func();
-    void wake_worker();
-    void process_due_timer(int64_t now);
-    void process_readable_streams();
-    void flush_pending_send(uint32_t stream_id);
+  void worker_func();
+  void wake_worker();
+  void process_due_timer(int64_t now);
+  void process_readable_streams();
+  void flush_pending_send(uint32_t stream_id);
 
-    // Pending actions
-    std::mutex action_mutex;
-    std::vector<std::function<void()>> pending_actions;
-    std::set<uint32_t> pending_read_stream_ids;
-    bool read_action_queued = false;
-    void process_actions();
+  // Pending actions
+  std::mutex action_mutex;
+  std::vector<std::function<void()>> pending_actions;
+  std::set<uint32_t> pending_read_stream_ids;
+  bool read_action_queued = false;
+  void process_actions();
 };
 
 // ============================================================================
@@ -179,7 +192,11 @@ struct E2EContext {
     bool wait_until(std::function<bool()> condition, int timeout_ms = 5000);
     bool wait_conn_state(E2EEndpoint &ep, int state, int timeout_ms = 5000);
     bool wait_stream_state(E2EEndpoint &ep, int state, int timeout_ms = 5000);
-    bool wait_data_received(E2EEndpoint &ep, uint32_t stream_id, size_t min_bytes, int timeout_ms = 5000);
+    bool wait_data_received(
+        E2EEndpoint &ep,
+        uint32_t stream_id,
+        size_t min_bytes,
+        int timeout_ms = 5000);
     bool wait_pending_send_complete(E2EEndpoint &ep, int timeout_ms = 5000);
 };
 
@@ -190,12 +207,23 @@ struct E2EContext {
 void e2e_set_timer(uint64_t wake_after_ms, void *user_data);
 int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data);
 int64_t e2e_monotonic_time_ms(void *user_data);
-int e2e_conn_connect_notify(kcpmux_conn_t *conn, const kcpmux_proto_ext_t *proto_ext,
-                            kcpmux_proto_ext_t *resp_proto_ext, void *user_data);
-void e2e_conn_state_changed(kcpmux_conn_t *conn, uint8_t old_state, uint8_t new_state, void *user_data);
+int e2e_conn_connect_notify(
+    kcpmux_conn_t *conn,
+    const kcpmux_proto_ext_t *proto_ext,
+    kcpmux_proto_ext_t *resp_proto_ext,
+    void *user_data);
+void e2e_conn_state_changed(
+    kcpmux_conn_t *conn,
+    uint8_t old_state,
+    uint8_t new_state,
+    void *user_data);
 void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data);
 int e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data);
-void e2e_stream_state_changed(kcpmux_stream_t *stream, uint8_t old_state, uint8_t new_state, void *user_data);
+void e2e_stream_state_changed(
+    kcpmux_stream_t *stream,
+    uint8_t old_state,
+    uint8_t new_state,
+    void *user_data);
 void e2e_stream_read_notify(kcpmux_stream_t *stream, void *user_data);
 void e2e_stream_write_notify(kcpmux_stream_t *stream, void *user_data);
 void e2e_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data);

@@ -76,6 +76,11 @@ See [demo/README.md](demo/README.md) for the full demo usage.
 See [docs/protocol.md](docs/protocol.md) for the current wire format and
 connection/stream state behavior.
 
+## Architecture Decision Records
+
+- [Use an indexed binary min-heap for kcpmux deadlines](docs/adr/0001-use-indexed-min-heap-for-kcpmux-deadlines.md)
+- [Reject out-of-order unknown peer stream IDs](docs/adr/0002-reject-out-of-order-unknown-peer-stream-ids.md)
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

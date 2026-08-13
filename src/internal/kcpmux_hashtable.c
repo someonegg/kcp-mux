@@ -85,7 +85,6 @@ void kcpmux_htb_add_direct(kcpmux_htb_t *ht, list_head *node, void *key, uint32_
     ht->num ++;
 }
 
-
 void kcpmux_htb_del(kcpmux_htb_t *ht, list_head *node)
 {
     if (!ht || !node) {

@@ -2,8 +2,8 @@
 #include <numeric>
 #include <random>
 
-static uint32_t kcpmux_test_checksum(const uint8_t *data, size_t size,
-                                     uint32_t seed) {
+static uint32_t kcpmux_test_checksum(const uint8_t *data, size_t size, uint32_t seed)
+{
     uint32_t hash = seed ? seed : 2166136261u;
     for (size_t i = 0; i < size; ++i) {
         hash ^= data[i];
@@ -97,7 +97,9 @@ TEST_F(kcpmux_e2e_transfer, transfer_concurrent_streams) {
     // Queue all streams before waiting so their KCP sessions progress together.
     for (int i = 0; i < NUM_STREAMS; i++) {
         ctx.client.send_data_on_stream_with_retry(
-            stream_ids[i], send_data_list[i].data(), send_data_list[i].size());
+            stream_ids[i],
+            send_data_list[i].data(),
+            send_data_list[i].size());
     }
 
     ASSERT_TRUE(ctx.wait_pending_send_complete(ctx.client, 15000));
