@@ -277,8 +277,9 @@ typedef struct kcpmux_engine_callbacks_s {
 } kcpmux_engine_callbacks_t;
 
 typedef struct kcpmux_conn_callbacks_s {
-    // Notifications may update external state or enqueue work, but must not
-    // reenter kcpmux. Keep the external user_data wrapper alive until close.
+    // Notifications may call connection query APIs, update external state, or
+    // enqueue work, but must not call APIs that mutate kcpmux state (for example,
+    // creating a stream). Keep the external user_data wrapper alive until close.
     void (*conn_state_changed)(
         kcpmux_conn_t *conn,
         uint8_t old_state,
@@ -298,8 +299,9 @@ typedef struct kcpmux_conn_callbacks_s {
 } kcpmux_conn_callbacks_t;
 
 typedef struct kcpmux_stream_callbacks_s {
-    // Notifications may update external state or enqueue work, but must not
-    // reenter kcpmux. Keep the external user_data wrapper alive until close.
+    // Notifications may call stream query APIs, update external state, or enqueue
+    // work, but must not call APIs that mutate kcpmux state. Keep the external
+    // user_data wrapper alive until close.
     void (*stream_state_changed)(
         kcpmux_stream_t *stream,
         uint8_t old_state,

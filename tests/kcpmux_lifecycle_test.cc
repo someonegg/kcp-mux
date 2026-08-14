@@ -418,6 +418,72 @@ TEST(kcpmux_lifecycle, conn_duplicate_connect) {
     kcpmux_engine_destroy(engine);
 }
 
+TEST(kcpmux_lifecycle, closing_conn_is_replaced_by_distinct_generation) {
+    TestContext ctx;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    TestAddr addr(0x7f000001, 12346);
+    kcpmux_conn_callbacks_t callbacks = create_conn_callbacks(&ctx);
+
+    kcpmux_conn_t *old_conn = kcpmux_conn_connect(
+        engine, addr.get(), nullptr, nullptr, &callbacks, &ctx);
+    ASSERT_NE(old_conn, nullptr);
+    const uint32_t old_generation = old_conn->generation_id;
+    ASSERT_EQ(kcpmux_conn_close(old_conn), 0);
+    ASSERT_EQ(old_conn->state, KCPMUX_CONN_STATE_CLOSING);
+
+    const size_t packets_before = ctx.sent_packets.size();
+    kcpmux_conn_t *new_conn = kcpmux_conn_connect(
+        engine, addr.get(), nullptr, nullptr, &callbacks, &ctx);
+    ASSERT_NE(new_conn, nullptr);
+
+    EXPECT_EQ(ctx.conn_close_count, 1);
+    EXPECT_EQ(ctx.conn_close_reason, KCPMUX_CLOSE_REASON_REPLACED);
+    EXPECT_EQ(ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(engine, addr.get()), new_conn);
+    EXPECT_EQ(engine->conn_count, 1u);
+    EXPECT_EQ(new_conn->state, KCPMUX_CONN_STATE_CONNECTING);
+    EXPECT_NE(new_conn->generation_id, 0u);
+    EXPECT_NE(new_conn->generation_id, old_generation);
+    ASSERT_EQ(ctx.sent_packets.size(), packets_before + 1);
+    EXPECT_EQ(ctx.sent_packets.back()[0], KCPMUX_MSG_CONN_CONNECT);
+    EXPECT_EQ(read_u24(ctx.sent_packets.back().data() + 1), new_conn->generation_id);
+
+    // The stale generation is isolated before message-specific processing.
+    auto old_ack = build_conn_connect_ack(KCPMUX_ACK_RESULT_OK, old_generation);
+    auto old_close = build_conn_close(KCPMUX_CLOSE_REASON_NORMAL, old_generation);
+    const uint8_t payload_data[] = {0x01};
+    auto old_payload = build_stream_payload(2, payload_data, sizeof(payload_data), old_generation);
+    EXPECT_EQ(kcpmux_engine_input(
+                  engine, old_ack.data(), old_ack.size(), addr.get()),
+              -KCPMUX_ERR_NOT_FOUND);
+    EXPECT_EQ(kcpmux_engine_input(
+                  engine, old_close.data(), old_close.size(), addr.get()),
+              -KCPMUX_ERR_NOT_FOUND);
+    EXPECT_EQ(kcpmux_engine_input(
+                  engine, old_payload.data(), old_payload.size(), addr.get()),
+              -KCPMUX_ERR_NOT_FOUND);
+    EXPECT_EQ(new_conn->state, KCPMUX_CONN_STATE_CONNECTING);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(engine, addr.get()), new_conn);
+
+    // Duplicate connects must not disturb either a connecting or connected
+    // healthy generation.
+    EXPECT_EQ(kcpmux_conn_connect(
+                  engine, addr.get(), nullptr, nullptr, nullptr, nullptr),
+              nullptr);
+    auto new_ack = build_conn_connect_ack(
+        KCPMUX_ACK_RESULT_OK, new_conn->generation_id);
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, new_ack.data(), new_ack.size(), addr.get()), 0);
+    ASSERT_EQ(new_conn->state, KCPMUX_CONN_STATE_CONNECTED);
+    EXPECT_EQ(kcpmux_conn_connect(
+                  engine, addr.get(), nullptr, nullptr, nullptr, nullptr),
+              nullptr);
+    EXPECT_EQ(kcpmux_engine_get_conn_by_addr(engine, addr.get()), new_conn);
+
+    kcpmux_engine_destroy(engine);
+}
+
 TEST(kcpmux_lifecycle, conn_get_by_addr) {
     TestContext ctx;
     kcpmux_engine_t *engine = create_test_engine(&ctx);

@@ -234,8 +234,10 @@ kcpmux_conn_t *kcpmux_conn_connect(
     // Update API call statistics
     engine->stats.api_conn_connect_calls++;
 
-    // Check if connection already exists
-    if (kcpmux_engine_get_conn_by_addr(engine, peer_addr)) {
+    // A healthy or connecting connection remains unique per address. A
+    // lingering CLOSING generation may be replaced immediately.
+    kcpmux_conn_t *old_conn = kcpmux_engine_get_conn_by_addr(engine, peer_addr);
+    if (old_conn && old_conn->state != KCPMUX_CONN_STATE_CLOSING) {
         kcpmux_engine_operation_leave(engine);
         return NULL;
     }
@@ -253,6 +255,14 @@ kcpmux_conn_t *kcpmux_conn_connect(
     }
     conn->user_data = user_data;
 
+    // A generation identifies the address mapping on the wire. Ensure a
+    // locally replaced generation can never collide with the closing one.
+    if (old_conn && conn->generation_id == old_conn->generation_id) {
+        conn->generation_id = old_conn->generation_id == 0x00FFFFFFU
+            ? 1U
+            : old_conn->generation_id + 1U;
+    }
+
     // Set self protocol extension data
     if (proto_ext && proto_ext->data && proto_ext->len > 0) {
         unsigned len = proto_ext->len;
@@ -262,6 +272,13 @@ kcpmux_conn_t *kcpmux_conn_connect(
         memcpy(conn->self_proto_ext_buf, proto_ext->data, len);
         conn->self_proto_ext.data = conn->self_proto_ext_buf;
         conn->self_proto_ext.len = len;
+    }
+
+    // The replacement is fully initialized before the old close cascade. The
+    // close notification is synchronous, while physical release stays deferred
+    // until this public operation leaves.
+    if (old_conn) {
+        kcpmux_conn_close_internal(old_conn, KCPMUX_CLOSE_REASON_REPLACED);
     }
 
     // Add to engine

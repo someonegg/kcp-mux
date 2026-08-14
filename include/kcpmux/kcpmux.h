@@ -51,9 +51,16 @@ void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *sta
 
 // Engines own connections, and connections own streams. Once an object reaches
 // CLOSED or ERROR, it is removed and released automatically. A terminal handle
-// becomes invalid when its close callback returns. Unless explicitly allowed by
-// the callback declaration, callbacks must defer kcpmux_* calls to a later loop.
+// becomes invalid when its close callback returns. Query APIs (getters and stats)
+// are safe in callbacks while the handle is valid. Unless explicitly allowed by
+// the callback declaration, callbacks must defer calls that mutate kcpmux state
+// to a later loop.
 
+// Creates the initiator connection for an address. Returns NULL while an
+// existing connection is CONNECTING or CONNECTED. An existing CLOSING
+// connection is synchronously closed with KCPMUX_CLOSE_REASON_REPLACED and a
+// distinct non-zero generation is installed; its close callback runs inside
+// this call before the new CONNECT is sent.
 kcpmux_conn_t *kcpmux_conn_connect(
     kcpmux_engine_t *engine,
     const kcpmux_addr_t *peer_addr,
