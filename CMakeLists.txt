@@ -67,6 +67,10 @@ install(DIRECTORY include/kcpmux
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
+install(FILES third_party/kcp/ikcp.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/kcpmux
+)
+
 include(CMakePackageConfigHelpers)
 
 write_basic_package_version_file(
