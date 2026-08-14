@@ -258,6 +258,7 @@ TEST(kcpmux_lifecycle, engine_config_default_values) {
 
     EXPECT_EQ(stream_config.ctrl_timeout_ms, KCPMUX_DEFAULT_SCONTROL_TIMEOUT_MS);
     EXPECT_EQ(stream_config.close_retries, KCPMUX_DEFAULT_SCLOSE_RETRIES);
+    EXPECT_EQ(stream_config.drain_timeout_ms, KCPMUX_DEFAULT_SDRAIN_TIMEOUT_MS);
     EXPECT_EQ(stream_config.batch_threshold, KCPMUX_DEFAULT_BATCH_THRESHOLD);
 }
 
@@ -310,6 +311,9 @@ TEST(kcpmux_lifecycle, stream_config_validation_boundaries) {
 
     kcpmux_stream_config_init(&source);
     source.ctrl_timeout_ms = 0;
+    EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
+    kcpmux_stream_config_init(&source);
+    source.drain_timeout_ms = 0;
     EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
     kcpmux_stream_config_init(&source);
     source.send_pause_threshold = 0;
@@ -1062,7 +1066,8 @@ TEST(kcpmux_lifecycle, stream_close_timeout) {
     // Send bootstrap payload so close uses protocol close path (not immediate local close).
     uint8_t bootstrap = 0x7f;
     ASSERT_EQ(kcpmux_stream_send(stream, &bootstrap, 1, 1), 1);
-    ctx.deliver_all();
+    pump_kcp(ctx);
+    pump_kcp(ctx);
 
     // Close stream
     ctx.client_ctx.stream_close_count = 0;
@@ -1169,13 +1174,15 @@ TEST(kcpmux_lifecycle, stream_close_initiator) {
     uint8_t bootstrap = 0x7f;
     int ret = kcpmux_stream_send(client_stream, &bootstrap, 1, 1);
     ASSERT_EQ(ret, 1);
-
-    ctx.deliver_all();
+    pump_kcp(ctx);
+    pump_kcp(ctx);
 
     uint32_t stream_id = kcpmux_stream_id(client_stream);
     kcpmux_stream_t *server_stream = kcpmux_conn_get_stream_by_id(server_conn, stream_id);
     kcpmux_stream_callbacks_t server_stream_callbacks = create_stream_callbacks(&ctx.server_ctx);
     kcpmux_stream_set_callbacks(server_stream, &server_stream_callbacks, &ctx.server_ctx);
+    uint8_t received = 0;
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, &received, sizeof(received)), 1);
 
     // Client closes stream
     kcpmux_stream_close(client_stream);
@@ -1183,6 +1190,8 @@ TEST(kcpmux_lifecycle, stream_close_initiator) {
 
     // Deliver STREAM_CLOSE to server
     ctx.deliver_client_to_server();
+    EXPECT_EQ(kcpmux_stream_get_state(server_stream), KCPMUX_STREAM_STATE_CLOSING);
+    kcpmux_engine_update(ctx.server_engine);
     EXPECT_EQ(ctx.server_ctx.stream_close_state, KCPMUX_STREAM_STATE_CLOSED);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(server_conn, stream_id), nullptr);
 

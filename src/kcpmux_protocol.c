@@ -228,12 +228,7 @@ int kcpmux_protocol_input(
 
         kcpmux_conn_note_receive(conn, recv_time_ms, 0);
 
-        // Send close ack
-        kcpmux_stream_send_close_ack(stream, reason);
-
-        // Close stream
-        kcpmux_stream_close_internal(stream, reason);
-        return 0;
+        return kcpmux_stream_handle_close(stream, reason);
     }
 
     case KCPMUX_MSG_STREAM_CLOSE_ACK: {
@@ -243,7 +238,10 @@ int kcpmux_protocol_input(
         if (stream_id == 0) return -KCPMUX_ERR_INVALID_FORMAT;
 
         kcpmux_stream_t *stream = kcpmux_conn_get_stream_by_id(conn, stream_id);
-        if (!stream || stream->state != KCPMUX_STREAM_STATE_CLOSING) return KCPMUX_ERR_STATE;
+        if (!stream || stream->state != KCPMUX_STREAM_STATE_CLOSING ||
+            stream->close_phase != KCPMUX_STREAM_CLOSE_WAIT_ACK) {
+            return KCPMUX_ERR_STATE;
+        }
 
         kcpmux_conn_note_receive(conn, recv_time_ms, 0);
 
@@ -282,6 +280,7 @@ int kcpmux_protocol_input(
                 memset(&stream->callbacks, 0, sizeof(stream->callbacks));
                 stream->user_data = NULL;
                 stream->close_reason = KCPMUX_CLOSE_REASON_REJECTED;
+                stream->close_phase = KCPMUX_STREAM_CLOSE_WAIT_ACK;
                 stream->retry_count = 0;
                 stream->last_ctrl_ts = recv_time_ms;
                 kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);

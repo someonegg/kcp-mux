@@ -110,6 +110,7 @@ typedef struct kcpmux_proto_ext_s {
 // Stream defaults
 #define KCPMUX_DEFAULT_SCONTROL_TIMEOUT_MS     600     // 600ms
 #define KCPMUX_DEFAULT_SCLOSE_RETRIES          1       // 1 retry
+#define KCPMUX_DEFAULT_SDRAIN_TIMEOUT_MS       5000    // 5s graceful drain timeout
 
 // KCP defaults
 #define KCPMUX_DEFAULT_KCP_MSS                 1200
@@ -143,6 +144,7 @@ typedef struct kcpmux_stream_config_s {
     // Control Message
     uint32_t ctrl_timeout_ms;         // Control timeout; must be nonzero
     uint32_t close_retries;           // Retransmissions after the initial CLOSE
+    uint32_t drain_timeout_ms;        // Graceful send/read drain timeout; must be nonzero
 
     // KCP parameters
     uint16_t kcp_mss;                 // KCP payload MSS; 1..1468

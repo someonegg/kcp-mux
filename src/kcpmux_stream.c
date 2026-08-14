@@ -8,6 +8,32 @@
 #include <string.h>
 
 static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms);
+static void kcpmux_stream_advance_local_close(kcpmux_stream_t *stream, int64_t now);
+static void kcpmux_stream_clear_pending(kcpmux_stream_t *stream);
+
+static int64_t kcpmux_stream_earlier_deadline(int64_t first, int64_t second)
+{
+    return first < second ? first : second;
+}
+
+static int kcpmux_stream_kcp_active(const kcpmux_stream_t *stream)
+{
+    return stream->state == KCPMUX_STREAM_STATE_OPEN ||
+        (stream->state == KCPMUX_STREAM_STATE_CLOSING &&
+         stream->close_phase == KCPMUX_STREAM_CLOSE_LOCAL_DRAIN);
+}
+
+static void kcpmux_stream_schedule_finalize(
+    kcpmux_stream_t *stream,
+    uint8_t reason,
+    int64_t now)
+{
+    stream->close_reason = reason;
+    stream->close_phase = KCPMUX_STREAM_CLOSE_FINALIZE;
+    kcpmux_stream_clear_pending(stream);
+    (void)kcpmux_engine_schedule_timer_node(
+        stream->conn->engine, &stream->timer_node, now, now);
+}
 
 static void kcpmux_stream_clear_pending(kcpmux_stream_t *stream)
 {
@@ -58,7 +84,7 @@ static int __kcp_output(const char *buf, int len, void *kcp, void *user)
 {
     kcpmux_stream_t *stream = (kcpmux_stream_t *)user;
     if (!stream || !stream->conn) return -1;
-    if (stream->internal_closed || stream->state != KCPMUX_STREAM_STATE_OPEN ||
+    if (stream->internal_closed || !kcpmux_stream_kcp_active(stream) ||
         stream->conn->internal_closed ||
         stream->conn->state != KCPMUX_CONN_STATE_CONNECTED) {
         return -1;
@@ -244,17 +270,30 @@ int kcpmux_stream_close(kcpmux_stream_t *stream)
     // Update API call statistics
     stream->conn->engine->stats.api_stream_close_calls++;
 
-    if (stream->state == KCPMUX_STREAM_STATE_CLOSING ||
-        stream->state == KCPMUX_STREAM_STATE_CLOSED ||
+    if (stream->state == KCPMUX_STREAM_STATE_CLOSING) {
+        // A local close while passively draining means the application no
+        // longer wants the unread tail. Complete outside this API stack.
+        if (stream->close_phase == KCPMUX_STREAM_CLOSE_REMOTE_DRAIN) {
+            kcpmux_stream_schedule_finalize(
+                stream, KCPMUX_CLOSE_REASON_NORMAL,
+                kcpmux_engine_now(stream->conn->engine));
+        }
+        kcpmux_engine_operation_leave(engine);
+        return 0;
+    }
+    if (stream->state == KCPMUX_STREAM_STATE_CLOSED ||
         stream->state == KCPMUX_STREAM_STATE_ERROR) {
         kcpmux_engine_operation_leave(engine);
         return 0;
     }
 
     // Initialize all closing anchors before exposing the state transition.
-    stream->last_ctrl_ts = kcpmux_engine_now(stream->conn->engine);
+    int64_t now = kcpmux_engine_now(stream->conn->engine);
+    stream->last_ctrl_ts = now;
+    stream->drain_started_ts = now;
     stream->close_reason = KCPMUX_CLOSE_REASON_NORMAL;
     stream->retry_count = 0;
+    stream->close_phase = KCPMUX_STREAM_CLOSE_LOCAL_DRAIN;
     kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);
     // For locally initiated streams that never sent payload, close directly
     // to avoid sending STREAM_CLOSE for a stream unknown to peer.
@@ -264,11 +303,10 @@ int kcpmux_stream_close(kcpmux_stream_t *stream)
         return 0;
     }
 
-    // Send close message
-    kcpmux_stream_send_close(stream, KCPMUX_CLOSE_REASON_NORMAL);
-    if (stream->config.close_retries == 0) {
-        kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_NORMAL);
-    }
+    // Flush batched sends and begin transport draining immediately.
+    (void)kcpmux_engine_schedule_timer_node(
+        engine, &stream->timer_node, now, now);
+    kcpmux_stream_advance_local_close(stream, now);
 
     kcpmux_engine_operation_leave(engine);
     return 0;
@@ -420,7 +458,9 @@ int kcpmux_stream_peek_size(kcpmux_stream_t *stream)
     if (stream->internal_closed) {
         return KCPMUX_ERR_CLOSED;
     }
-    if (stream->state != KCPMUX_STREAM_STATE_OPEN) {
+    if (stream->state != KCPMUX_STREAM_STATE_OPEN &&
+        !(stream->state == KCPMUX_STREAM_STATE_CLOSING &&
+          stream->close_phase == KCPMUX_STREAM_CLOSE_REMOTE_DRAIN)) {
         return KCPMUX_ERR_STATE;
     }
 
@@ -457,6 +497,14 @@ int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size)
 
     // Update statistics
     stream->stats.up_recv_bytes += ret;
+
+    if (stream->state == KCPMUX_STREAM_STATE_CLOSING &&
+        stream->close_phase == KCPMUX_STREAM_CLOSE_REMOTE_DRAIN &&
+        ops->peeksize(stream->kcp) <= 0) {
+        kcpmux_stream_schedule_finalize(
+            stream, stream->close_reason,
+            kcpmux_engine_now(stream->conn->engine));
+    }
 
     return ret;
 }
@@ -520,6 +568,22 @@ void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state)
     }
 }
 
+static void kcpmux_stream_advance_local_close(kcpmux_stream_t *stream, int64_t now)
+{
+    if (!stream || stream->internal_closed ||
+        stream->close_phase != KCPMUX_STREAM_CLOSE_LOCAL_DRAIN ||
+        stream->conn->engine->kcp_ops->waitsnd(stream->kcp) != 0) {
+        return;
+    }
+
+    stream->close_phase = KCPMUX_STREAM_CLOSE_WAIT_ACK;
+    stream->retry_count = 0;
+    kcpmux_stream_send_close(stream, KCPMUX_CLOSE_REASON_NORMAL);
+    if (stream->config.close_retries == 0) {
+        kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_NORMAL);
+    }
+}
+
 void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now)
 {
     if (!stream || stream->internal_closed || stream->conn->internal_closed ||
@@ -560,20 +624,57 @@ void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now)
         break;
 
     case KCPMUX_STREAM_STATE_CLOSING:
-        // Check close timeout and retransmit
-        if (now >=
-            kcpmux_timer_deadline_after(stream->last_ctrl_ts, stream->config.ctrl_timeout_ms)) {
-            if (stream->retry_count < stream->config.close_retries) {
-                stream->retry_count++;
-                kcpmux_stream_send_close(stream, stream->close_reason);
-                if (stream->retry_count == stream->config.close_retries) {
+        switch (stream->close_phase) {
+        case KCPMUX_STREAM_CLOSE_LOCAL_DRAIN: {
+            kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+            kcpmux_stream_clear_pending(stream);
+            ops->update(stream->kcp, now);
+            if (ops->waitsnd(stream->kcp) == 0) {
+                kcpmux_stream_advance_local_close(stream, now);
+                return;
+            }
+            if (now >= kcpmux_timer_deadline_after(
+                    stream->drain_started_ts, stream->config.drain_timeout_ms)) {
+                stream->close_reason = KCPMUX_CLOSE_REASON_TIMEOUT;
+                kcpmux_stream_send_close(stream, KCPMUX_CLOSE_REASON_TIMEOUT);
+                kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_TIMEOUT);
+                return;
+            }
+            kcpmux_stream_refresh_timer(stream, now);
+            break;
+        }
+
+        case KCPMUX_STREAM_CLOSE_WAIT_ACK:
+            if (now >= kcpmux_timer_deadline_after(
+                    stream->last_ctrl_ts, stream->config.ctrl_timeout_ms)) {
+                if (stream->retry_count < stream->config.close_retries) {
+                    stream->retry_count++;
+                    kcpmux_stream_send_close(stream, stream->close_reason);
+                    if (stream->retry_count == stream->config.close_retries) {
+                        kcpmux_stream_close_internal(stream, stream->close_reason);
+                        return;
+                    }
+                } else {
                     kcpmux_stream_close_internal(stream, stream->close_reason);
                     return;
                 }
-            } else {
-                kcpmux_stream_close_internal(stream, stream->close_reason);
+            }
+            break;
+
+        case KCPMUX_STREAM_CLOSE_REMOTE_DRAIN:
+            if (now >= kcpmux_timer_deadline_after(
+                    stream->drain_started_ts, stream->config.drain_timeout_ms)) {
+                kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_TIMEOUT);
                 return;
             }
+            break;
+
+        case KCPMUX_STREAM_CLOSE_FINALIZE:
+            kcpmux_stream_close_internal(stream, stream->close_reason);
+            return;
+
+        default:
+            break;
         }
         break;
 
@@ -606,9 +707,28 @@ void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now)
         break;
 
     case KCPMUX_STREAM_STATE_CLOSING:
-        deadline_ms = kcpmux_timer_deadline_after(
-            stream->last_ctrl_ts,
-            stream->config.ctrl_timeout_ms);
+        switch (stream->close_phase) {
+        case KCPMUX_STREAM_CLOSE_LOCAL_DRAIN:
+            deadline_ms = kcpmux_stream_earlier_deadline(
+                stream->conn->engine->kcp_ops->check(stream->kcp, now),
+                kcpmux_timer_deadline_after(
+                    stream->drain_started_ts, stream->config.drain_timeout_ms));
+            break;
+        case KCPMUX_STREAM_CLOSE_WAIT_ACK:
+            deadline_ms = kcpmux_timer_deadline_after(
+                stream->last_ctrl_ts, stream->config.ctrl_timeout_ms);
+            break;
+        case KCPMUX_STREAM_CLOSE_REMOTE_DRAIN:
+            deadline_ms = kcpmux_timer_deadline_after(
+                stream->drain_started_ts, stream->config.drain_timeout_ms);
+            break;
+        case KCPMUX_STREAM_CLOSE_FINALIZE:
+            deadline_ms = now;
+            break;
+        default:
+            kcpmux_engine_cancel_timer_node(stream->conn->engine, &stream->timer_node, now);
+            return;
+        }
         break;
 
     default:
@@ -643,7 +763,7 @@ int kcpmux_stream_handle_payload(
     if (stream->internal_closed) {
         return KCPMUX_ERR_CLOSED;
     }
-    if (stream->state != KCPMUX_STREAM_STATE_OPEN) {
+    if (!kcpmux_stream_kcp_active(stream)) {
         return KCPMUX_ERR_STATE;
     }
 
@@ -663,7 +783,7 @@ int kcpmux_stream_handle_payload(
     }
 
     // Check flow control recovery (edge-triggered: blocked -> readable)
-    if (stream->read_blocked) {
+    if (stream->state == KCPMUX_STREAM_STATE_OPEN && stream->read_blocked) {
         int peeksize = ops->peeksize(stream->kcp);
         if (peeksize > 0) {
             // Calculate and record read block time
@@ -681,6 +801,51 @@ int kcpmux_stream_handle_payload(
         }
     }
 
+    return 0;
+}
+
+int kcpmux_stream_handle_close(kcpmux_stream_t *stream, uint8_t reason)
+{
+    if (!stream || stream->internal_closed) return KCPMUX_ERR_CLOSED;
+
+    if (reason != KCPMUX_CLOSE_REASON_NORMAL) {
+        kcpmux_stream_send_close_ack(stream, reason);
+        kcpmux_stream_close_internal(stream, reason);
+        return 0;
+    }
+
+    int64_t now = kcpmux_engine_now(stream->conn->engine);
+    if (stream->state == KCPMUX_STREAM_STATE_CLOSING) {
+        switch (stream->close_phase) {
+        case KCPMUX_STREAM_CLOSE_LOCAL_DRAIN:
+            // A peer close wins a simultaneous close. Acknowledge it now and
+            // abandon locally queued KCP data instead of allowing both sides
+            // to wait for each other's close lifecycle.
+            kcpmux_stream_send_close_ack(stream, reason);
+            kcpmux_stream_schedule_finalize(stream, KCPMUX_CLOSE_REASON_NORMAL, now);
+            return 0;
+        case KCPMUX_STREAM_CLOSE_WAIT_ACK:
+            kcpmux_stream_send_close_ack(stream, reason);
+            kcpmux_stream_schedule_finalize(stream, KCPMUX_CLOSE_REASON_NORMAL, now);
+            return 0;
+        case KCPMUX_STREAM_CLOSE_REMOTE_DRAIN:
+        case KCPMUX_STREAM_CLOSE_FINALIZE:
+            kcpmux_stream_send_close_ack(stream, reason);
+            return 0;
+        default:
+            return KCPMUX_ERR_STATE;
+        }
+    }
+    if (stream->state != KCPMUX_STREAM_STATE_OPEN) return KCPMUX_ERR_STATE;
+
+    kcpmux_stream_send_close_ack(stream, reason);
+    stream->close_reason = reason;
+    stream->close_phase = KCPMUX_STREAM_CLOSE_REMOTE_DRAIN;
+    stream->drain_started_ts = now;
+    kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);
+    if (stream->conn->engine->kcp_ops->peeksize(stream->kcp) <= 0) {
+        kcpmux_stream_schedule_finalize(stream, reason, now);
+    }
     return 0;
 }
 

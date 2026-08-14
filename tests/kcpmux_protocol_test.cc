@@ -390,9 +390,9 @@ TEST(kcpmux_protocol, stream_close_message_format) {
     ASSERT_NE(stream, nullptr);
     kcpmux_stream_id(stream);
 
-    // Send payload first to ensure close follows protocol path.
-    uint8_t data[] = {0x01};
-    ASSERT_EQ(kcpmux_stream_send(stream, data, sizeof(data), 1), 1);
+    // Mark the initiator as known to its peer without introducing KCP data
+    // whose ACK must now be drained before the close control packet.
+    stream->stats.up_sent_bytes = 1;
 
     // Close stream
     ctx.sent_packets.clear();

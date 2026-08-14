@@ -218,11 +218,6 @@ TEST_F(kcpmux_stats_engine, stream_lifecycle) {
         &ctx.client_ctx);
     ASSERT_NE(client_stream, nullptr);
 
-    // Send bootstrap payload to trigger server-side auto-create.
-    uint8_t bootstrap = 0x7f;
-    int ret = kcpmux_stream_send(client_stream, &bootstrap, 1, 1);
-    ASSERT_EQ(ret, 1);
-
     // Check stream_created incremented
     kcpmux_engine_get_stats(ctx.client_engine, &stats);
     EXPECT_EQ(stats.stream_created_total, 1u);
@@ -231,8 +226,6 @@ TEST_F(kcpmux_stats_engine, stream_lifecycle) {
 
     // Close stream
     kcpmux_stream_close(client_stream);
-    ctx.deliver_all();
-
     // Check stream_closed incremented
     kcpmux_engine_get_stats(ctx.client_engine, &stats);
     EXPECT_EQ(stats.stream_closed_total, 1u);

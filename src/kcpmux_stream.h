@@ -4,6 +4,14 @@
 #include "kcpmux_engine.h"
 #include "kcpmux_kcp.h"
 
+typedef enum kcpmux_stream_close_phase_e {
+    KCPMUX_STREAM_CLOSE_NONE = 0,
+    KCPMUX_STREAM_CLOSE_LOCAL_DRAIN,
+    KCPMUX_STREAM_CLOSE_WAIT_ACK,
+    KCPMUX_STREAM_CLOSE_REMOTE_DRAIN,
+    KCPMUX_STREAM_CLOSE_FINALIZE,
+} kcpmux_stream_close_phase_t;
+
 // ============================================================================
 // Stream internal structure
 // ============================================================================
@@ -29,6 +37,8 @@ struct kcpmux_stream_s {
 
     // Close state
     uint8_t                   close_reason;    // Close reason
+    uint8_t                   close_phase;     // Internal graceful-close phase
+    int64_t                   drain_started_ts; // Current drain phase anchor
 
     // Absolute deadline timer
     kcpmux_timer_node_t       timer_node;
@@ -81,6 +91,9 @@ int kcpmux_stream_handle_payload(
     const uint8_t *buf,
     unsigned size,
     int64_t recv_time_ms);
+
+// Handle a peer close request, including graceful receive draining.
+int kcpmux_stream_handle_close(kcpmux_stream_t *stream, uint8_t reason);
 
 // Send messages
 // Return: 0 on success, < 0 on error

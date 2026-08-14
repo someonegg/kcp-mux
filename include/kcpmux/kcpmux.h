@@ -112,11 +112,15 @@ kcpmux_stream_t *kcpmux_stream_create(
     const kcpmux_stream_callbacks_t *callbacks,
     void *user_data);
 
-// Starts a terminal close. Returns 0 on success or a negative error code.
+// Starts a graceful one-way close. New sends are rejected while queued KCP
+// data drains. A peer receiving a normal close may keep reading already
+// received messages until empty. Forced connection/error closes do not drain.
+// Returns 0 on success or a negative error code.
 int kcpmux_stream_close(kcpmux_stream_t *stream);
 
 // Updates runtime configuration except kcp_mss, which is fixed at creation.
-// Invalid configuration is ignored.
+// ctrl_timeout_ms and drain_timeout_ms must be nonzero. Invalid configuration
+// is ignored.
 void kcpmux_stream_set_config(kcpmux_stream_t *stream, const kcpmux_stream_config_t *config);
 
 void kcpmux_stream_set_callbacks(
@@ -134,7 +138,8 @@ int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned siz
 // batch threshold. Does nothing when the stream has no pending operations.
 void kcpmux_stream_finish_batch(kcpmux_stream_t *stream);
 
-// Returns the next complete message size, 0 if unavailable, or a negative error.
+// Returns the next complete message size, including while draining a peer's
+// normal close; returns 0 if unavailable, or a negative error.
 int kcpmux_stream_peek_size(kcpmux_stream_t *stream);
 
 // Receives one complete message. Use kcpmux_stream_peek_size() to size the

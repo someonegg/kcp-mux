@@ -35,6 +35,7 @@ struct FakeKcpContext {
     int input_result = 0;
     int recv_result = -1;
     int peek_result = 0;
+    int waitsnd_result = 0;
     int total_update_calls = 0;
     int total_check_calls = 0;
     int total_input_calls = 0;
@@ -46,6 +47,7 @@ struct FakeKcpContext {
     int stream_read_calls = 0;
     int stream_write_calls = 0;
     int stream_close_calls = 0;
+    int stream_close_reason = -1;
     bool external_wrapper_alive = true;
     bool release_saw_released_wrapper = false;
     kcpmux_addr_t peer_addr{};
@@ -126,8 +128,7 @@ static int fake_peeksize(void *kcp)
 
 static int fake_waitsnd(void *kcp)
 {
-    (void)kcp;
-    return 0;
+    return static_cast<FakeKcp *>(kcp)->context->waitsnd_result;
 }
 
 static void fake_update(void *kcp, int64_t current)
@@ -207,11 +208,12 @@ static void fake_stream_write_notify(kcpmux_stream_t *, void *user_data)
     static_cast<FakeKcpContext *>(user_data)->stream_write_calls++;
 }
 
-static void fake_stream_close_notify(kcpmux_stream_t *, int, void *user_data)
+static void fake_stream_close_notify(kcpmux_stream_t *, int reason, void *user_data)
 {
     auto *context = static_cast<FakeKcpContext *>(user_data);
     context->lifecycle_events.push_back('S');
     context->stream_close_calls++;
+    context->stream_close_reason = reason;
 }
 
 static void fake_conn_close_notify(kcpmux_conn_t *, int, void *user_data)
@@ -221,16 +223,21 @@ static void fake_conn_close_notify(kcpmux_conn_t *, int, void *user_data)
     context->external_wrapper_alive = false;
 }
 
-static int fake_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
+static void set_stream_callbacks(kcpmux_stream_t *stream, FakeKcpContext *context)
 {
-    auto *context = static_cast<FakeKcpContext *>(user_data);
-    context->stream_create_calls++;
     kcpmux_stream_callbacks_t callbacks{};
     callbacks.stream_state_changed = fake_stream_state_notify;
     callbacks.stream_read_notify = fake_stream_read_notify;
     callbacks.stream_write_notify = fake_stream_write_notify;
     callbacks.stream_close_notify = fake_stream_close_notify;
-    kcpmux_stream_set_callbacks(stream, &callbacks, user_data);
+    kcpmux_stream_set_callbacks(stream, &callbacks, context);
+}
+
+static int fake_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
+{
+    auto *context = static_cast<FakeKcpContext *>(user_data);
+    context->stream_create_calls++;
+    set_stream_callbacks(stream, context);
     return context->stream_create_result;
 }
 
@@ -447,6 +454,202 @@ TEST_F(kcpmux_stream_timer, close_retries_wait_only_between_sends) {
     ASSERT_EQ(context.sent_packets.size(), 3u);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
     EXPECT_EQ(context.release_calls, 1);
+}
+
+TEST_F(kcpmux_stream_timer, normal_close_drains_waitsnd_before_close_control) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    set_stream_callbacks(stream, &context);
+    uint8_t byte = 0x42;
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    context.waitsnd_result = 2;
+    context.sent_packets.clear();
+
+    ASSERT_EQ(kcpmux_stream_close(stream), 0);
+    EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_LOCAL_DRAIN);
+    EXPECT_TRUE(context.sent_packets.empty());
+    EXPECT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), KCPMUX_ERR_STATE);
+
+    kcpmux_engine_update(engine);
+    EXPECT_TRUE(context.sent_packets.empty());
+    EXPECT_GT(context.total_update_calls, 0);
+
+    context.waitsnd_result = 0;
+    ASSERT_EQ(kcpmux_engine_schedule_timer_node(
+                  engine, &stream->timer_node,
+                  context.now_ms, context.now_ms), KCPMUX_ERR_OK);
+    kcpmux_engine_update(engine);
+
+    ASSERT_EQ(context.sent_packets.size(), 1u);
+    EXPECT_EQ(context.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE);
+    EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_WAIT_ACK);
+}
+
+TEST_F(kcpmux_stream_timer, peer_close_interrupts_local_send_drain) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    set_stream_callbacks(stream, &context);
+    uint8_t byte = 0x42;
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    context.waitsnd_result = 2;
+    context.sent_packets.clear();
+
+    ASSERT_EQ(kcpmux_stream_close(stream), 0);
+    ASSERT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_LOCAL_DRAIN);
+    ASSERT_TRUE(context.sent_packets.empty());
+    int update_calls = context.total_update_calls;
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, close.data(), close.size(), &context.peer_addr), 0);
+    ASSERT_EQ(context.sent_packets.size(), 1u);
+    EXPECT_EQ(context.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE_ACK);
+    EXPECT_EQ(context.sent_packets[0][8], KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_FINALIZE);
+    EXPECT_EQ(context.stream_close_calls, 0);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(context.total_update_calls, update_calls);
+    EXPECT_EQ(context.sent_packets.size(), 1u);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
+    EXPECT_EQ(context.release_calls, 1);
+}
+
+TEST_F(kcpmux_stream_timer, peer_close_while_waiting_for_close_ack_finishes_async) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    set_stream_callbacks(stream, &context);
+    stream->stats.up_sent_bytes = 1;
+
+    ASSERT_EQ(kcpmux_stream_close(stream), 0);
+    ASSERT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_WAIT_ACK);
+    ASSERT_EQ(context.sent_packets.size(), 1u);
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, close.data(), close.size(), &context.peer_addr), 0);
+    ASSERT_EQ(context.sent_packets.size(), 2u);
+    EXPECT_EQ(context.sent_packets.back()[0], KCPMUX_MSG_STREAM_CLOSE_ACK);
+    EXPECT_EQ(context.sent_packets.back()[8], KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_FINALIZE);
+    EXPECT_EQ(context.stream_close_calls, 0);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
+    EXPECT_EQ(context.release_calls, 1);
+}
+
+TEST_F(kcpmux_stream_timer, wait_close_ack_stops_processing_kcp_payloads) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    stream->stats.up_sent_bytes = 1;
+    ASSERT_EQ(kcpmux_stream_close(stream), 0);
+    ASSERT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_WAIT_ACK);
+    int input_calls = context.total_input_calls;
+    const uint8_t kcp_payload[] = {0xaa};
+    auto payload = build_stream_payload(
+        1, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+
+    EXPECT_EQ(kcpmux_engine_input(
+                  engine, payload.data(), payload.size(), &context.peer_addr),
+              KCPMUX_ERR_STATE);
+    EXPECT_EQ(context.total_input_calls, input_calls);
+}
+
+TEST_F(kcpmux_stream_timer, send_drain_timeout_forces_timeout_close) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.drain_timeout_ms = 10;
+    kcpmux_stream_t *stream = kcpmux_stream_new(conn, 1, &config, 1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_conn_add_stream(conn, stream);
+    set_stream_callbacks(stream, &context);
+    uint8_t byte = 0x42;
+    ASSERT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), 1);
+    context.waitsnd_result = 1;
+    context.sent_packets.clear();
+
+    ASSERT_EQ(kcpmux_stream_close(stream), 0);
+    context.now_ms += 10;
+    kcpmux_engine_update(engine);
+
+    ASSERT_EQ(context.sent_packets.size(), 1u);
+    EXPECT_EQ(context.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE);
+    EXPECT_EQ(context.sent_packets[0][8], KCPMUX_CLOSE_REASON_TIMEOUT);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
+}
+
+TEST_F(kcpmux_stream_timer, peer_normal_close_drains_reads_then_finishes_async) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    set_stream_callbacks(stream, &context);
+    context.peek_result = 4;
+    context.recv_result = 4;
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, close.data(), close.size(), &context.peer_addr), 0);
+    ASSERT_EQ(context.sent_packets.size(), 1u);
+    EXPECT_EQ(context.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE_ACK);
+    EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_REMOTE_DRAIN);
+    EXPECT_EQ(kcpmux_stream_peek_size(stream), 4);
+    EXPECT_EQ(context.stream_close_calls, 0);
+
+    uint8_t buf[4];
+    EXPECT_EQ(kcpmux_stream_recv(stream, buf, sizeof(buf)), 4);
+    EXPECT_EQ(context.stream_close_calls, 0);
+    ASSERT_NE(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
+}
+
+TEST_F(kcpmux_stream_timer, local_close_abandons_peer_read_drain_async) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+    set_stream_callbacks(stream, &context);
+    context.peek_result = 4;
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, close.data(), close.size(), &context.peer_addr), 0);
+    size_t packets = context.sent_packets.size();
+
+    ASSERT_EQ(kcpmux_stream_close(stream), 0);
+    EXPECT_EQ(context.stream_close_calls, 0);
+    EXPECT_EQ(context.sent_packets.size(), packets);
+
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
+}
+
+TEST_F(kcpmux_stream_timer, peer_read_drain_timeout_is_reported) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.drain_timeout_ms = 10;
+    kcpmux_stream_t *stream = kcpmux_stream_new(conn, 1, &config, 1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_conn_add_stream(conn, stream);
+    set_stream_callbacks(stream, &context);
+    context.peek_result = 4;
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    ASSERT_EQ(kcpmux_engine_input(
+                  engine, close.data(), close.size(), &context.peer_addr), 0);
+
+    context.now_ms += 10;
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
+    EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
 }
 
 TEST_F(kcpmux_stream_timer, active_older_peer_stream_continues_after_high_water_advances) {
@@ -695,6 +898,7 @@ TEST_F(kcpmux_stream_timer, closing_deadline_is_anchored_and_configurable) {
 
     stream->last_ctrl_ts = context.now_ms;
     stream->close_reason = KCPMUX_CLOSE_REASON_NORMAL;
+    stream->close_phase = KCPMUX_STREAM_CLOSE_WAIT_ACK;
     kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);
     EXPECT_EQ(stream->timer_node.deadline_ms, 1100);
 

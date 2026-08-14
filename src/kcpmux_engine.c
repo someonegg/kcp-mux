@@ -71,6 +71,7 @@ void kcpmux_stream_config_init(kcpmux_stream_config_t *config)
     if (!config) return;
     config->ctrl_timeout_ms       = KCPMUX_DEFAULT_SCONTROL_TIMEOUT_MS;
     config->close_retries         = KCPMUX_DEFAULT_SCLOSE_RETRIES;
+    config->drain_timeout_ms      = KCPMUX_DEFAULT_SDRAIN_TIMEOUT_MS;
     config->kcp_mss               = KCPMUX_DEFAULT_KCP_MSS;
     config->send_pause_threshold  = KCPMUX_DEFAULT_SEND_PAUSE_THRESHOLD;
     config->send_resume_threshold = KCPMUX_DEFAULT_SEND_RESUME_THRESHOLD;
@@ -94,6 +95,7 @@ int kcpmux_stream_config_prepare(
     const kcpmux_stream_config_t *src)
 {
     if (!dst || !src || src->ctrl_timeout_ms == 0 ||
+        src->drain_timeout_ms == 0 ||
         src->kcp_mss == 0 ||
         src->kcp_mss > KCPMUX_PROTO_MSG_MAX_LEN - 8 - KCPMUX_IKCP_OVERHEAD ||
         src->send_pause_threshold == 0 ||

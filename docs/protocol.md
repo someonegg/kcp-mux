@@ -1,4 +1,4 @@
-# KCPMUX Wire Protocol
+# KCPMUX Protocol And Lifecycle
 
 This document describes the current implementation, mainly [src/kcpmux_protocol.c](../src/kcpmux_protocol.c). The protocol layer wraps connection control, stream control, and KCP output packets into lower-layer datagrams. Actual socket I/O, timing, and peer address handling are provided by upper-layer callbacks and `kcpmux_engine`.
 
@@ -18,7 +18,7 @@ General rules:
 - `generation_id` is a nonzero 24-bit connection generation. Except for `CONN_CONNECT`, packets are accepted only when both peer address and generation match.
 - `stream_id` is a nonzero 32-bit unsigned integer; initiators use odd ids and acceptors use even ids.
 - The current protocol version is `KCPMUX_VERSION = 3`.
-- The stack buffer limit for one protocol message is `KCPMUX_PROTO_MSG_MAX_LEN = 1500`.
+- Senders cap generated protocol messages at `KCPMUX_PROTO_MSG_MAX_LEN = 1500`.
 - Protocol extension data is limited to `KCPMUX_PROTO_EXT_MAX_LEN = 512`.
 - The receiver validates minimum length and declared extension length, but does not require the datagram length to exactly match the message length. Extra trailing bytes are ignored, except for `STREAM_PAYLOAD`, where all bytes after the header are passed into KCP.
 
@@ -56,7 +56,7 @@ On receive, the acceptor:
 2. Looks up an existing connection by peer address and compares its generation.
 3. If the generation matches, treats the packet as a retransmission and resends a successful ACK.
 4. If the generation differs, creates the replacement before closing the old connection with `KCPMUX_CLOSE_REASON_REPLACED`.
-5. Stores the peer extension data and calls `engine->callbacks.conn_connect_notify`. Only `KCPMUX_ACK_RESULT_OK` accepts the connection; any other result rejects and automatically releases it.
+5. Stores the peer extension data and calls `engine->callbacks.conn_connect_notify` when installed. Only `KCPMUX_ACK_RESULT_OK` accepts the connection; a missing callback or any other result rejects and automatically releases it.
 
 Note: if the version does not match and no connection exists for the peer address, the current implementation only returns an error. It does not create a temporary connection to send a version-reject ACK.
 
@@ -117,7 +117,9 @@ Default values:
 | `keepalive_interval_ms` | `10000ms` |
 | `keepalive_timeout_ms` | `30000ms` |
 
-If a `CONNECTED` connection has not received any packet for `keepalive_timeout_ms`, it enters `ERROR` and closes with `TIMEOUT`.
+If a `CONNECTED` connection has not successfully processed a valid packet for
+the current generation within `keepalive_timeout_ms`, it enters `ERROR` and
+closes with `TIMEOUT`.
 `ctrl_timeout_ms` must be nonzero. A zero `keepalive_timeout_ms` uses the
 default `30000ms`; a zero keepalive interval still disables keepalive sends.
 
@@ -151,7 +153,10 @@ Close retransmission uses the connection `ctrl_timeout_ms` and `close_retries`. 
 
 ### Idle Timeout
 
-The connection also tracks `last_payload_ts`. If `idle_timeout_ms > 0` and no `STREAM_PAYLOAD` has been received for that duration, the connection sends `CONN_CLOSE(IDLE)` and then closes locally immediately without waiting for an ACK. The default `idle_timeout_ms` is `60000ms`.
+The connection also tracks `last_payload_ts`. If `idle_timeout_ms > 0` and no
+`STREAM_PAYLOAD` has been successfully processed for that duration, the
+connection sends `CONN_CLOSE(IDLE)` and then closes locally immediately without
+waiting for an ACK. The default `idle_timeout_ms` is `60000ms`.
 
 ## Stream Multiplexing
 
@@ -164,7 +169,14 @@ Stream ids are 32-bit numbers:
 - The initial id is randomly chosen with the correct parity, then incremented by 2.
 - Allocation wraps naturally at 32 bits, skips zero and active ids, and preserves local parity.
 
-When receiving `STREAM_PAYLOAD` for an unknown `stream_id`, the protocol first validates peer parity. It then applies serial-number ordering against the latest accepted peer stream id: an older, duplicate, or half-ring id is rejected so delayed packets cannot recreate a closed stream. Existing streams remain valid after the high-water mark advances.
+When receiving `STREAM_PAYLOAD` for an unknown `stream_id`, the protocol first
+validates peer parity. It then applies serial-number ordering against the peer
+stream id high-water mark: an older, duplicate, or half-ring id is rejected so
+delayed packets cannot recreate a closed stream. The high-water mark advances
+after the id passes these checks and the stream is created, before the creation
+callback or KCP input runs. A later callback rejection or KCP input failure
+therefore still consumes the id. Existing streams remain valid after the mark
+advances.
 
 ### No Explicit Stream Open Message
 
@@ -219,10 +231,12 @@ Receive path:
 3. It strips the 8-byte KCPMUX header and feeds the remaining bytes into that stream's KCP instance.
 4. If KCP changes from unreadable to readable, `stream_read_notify` is triggered.
 
-Packet size limits:
+Packet size behavior:
 
-- Total `STREAM_PAYLOAD` length cannot exceed 1500.
-- The KCPMUX header is 8 bytes, so one wrapped KCP segment can carry at most 1492 bytes.
+- Generated `STREAM_PAYLOAD` messages cannot exceed 1500 bytes.
+- The KCPMUX header is 8 bytes, so the sender accepts at most 1492 bytes from a
+  KCP output callback. The current receive path does not enforce this total
+  datagram limit and passes all bytes after the header to KCP.
 - The default `kcp_mss` is `1200`; KCP's own header overhead is defined as 24 bytes.
 - `kcp_mss` must be `1..1468` and is fixed when the stream is created.
 - `send_pause_threshold` must be nonzero, and `send_resume_threshold` must not
@@ -239,9 +253,48 @@ Packet size limits:
 +-------------------+-------------------------------+-------------------+-------------------+
 ```
 
-The receiver must find an existing stream, and `stream_id` must not be `0`. It sends `STREAM_CLOSE_ACK` and then closes the stream. If the stream is not found, the receiver returns `KCPMUX_ERR_NOT_FOUND`.
+The receiver must find an existing stream, and `stream_id` must not be `0`.
+Normal close follows the receive-drain behavior below; non-normal close sends an
+ACK and closes immediately. If the stream is not found, the receiver returns
+`KCPMUX_ERR_NOT_FOUND`.
 
-When `kcpmux_stream_close` is called locally, the stream enters `CLOSING`, records `close_reason = NORMAL`, and sends `STREAM_CLOSE`. The exception is a locally initiated stream that has never sent upper-layer data: it does not send a close packet and closes locally.
+When `kcpmux_stream_close` is called locally, the stream enters `CLOSING` and
+rejects new upper-layer sends. During send drain, KCP continues to update,
+retransmit, and process ACKs. `STREAM_CLOSE(NORMAL)` is sent only after KCP
+`waitsnd` reaches zero, so
+all data accepted before close has reached the peer KCP. A locally initiated
+stream that has never sent upper-layer data remains unknown to the peer and
+closes locally without a control packet.
+
+After `STREAM_CLOSE` is sent, the active closer stops processing KCP payloads
+and only runs the control-message ACK/retry lifecycle. Reverse-direction data
+is outside this one-way close guarantee.
+
+The send drain is bounded by `drain_timeout_ms`. If it expires, the sender makes
+one best-effort `STREAM_CLOSE(TIMEOUT)` send and closes locally with `TIMEOUT`.
+Connection cascades and non-normal stream closes remain forced and do not wait
+for KCP drain.
+
+When an `OPEN` stream receives a normal peer close, it sends `STREAM_CLOSE_ACK`
+immediately and remains `CLOSING` while complete messages are readable. New
+sends are rejected; `kcpmux_stream_peek_size` and `kcpmux_stream_recv` remain
+available until the receive queue becomes empty. Final consumption schedules
+the close notification asynchronously through the engine timer. Calling
+`kcpmux_stream_close` during this receive drain discards the unread tail and
+schedules the same asynchronous normal completion. If the application does not
+drain within `drain_timeout_ms`, the unread tail is discarded and the close
+notification reports `TIMEOUT`.
+
+If a normal peer close arrives after local close has begun, during either send
+drain or close-ACK wait, the peer close wins. The stream sends
+`STREAM_CLOSE_ACK` immediately, abandons its local close lifecycle and any
+queued KCP data, and schedules normal completion. This prevents simultaneous
+close from leaving each side waiting on the other.
+
+This is a one-way graceful-close contract, not TCP half-close: the active closer
+does not receive an EOF indication and does not promise to deliver peer data to
+its application after close begins. Transport ACK completion means the peer KCP
+accepted the data; it does not mean the peer application consumed it.
 
 ### `STREAM_CLOSE_ACK`
 
@@ -252,7 +305,9 @@ When `kcpmux_stream_close` is called locally, the stream enters `CLOSING`, recor
 +-------------------+-------------------------------+-------------------+-------------------+
 ```
 
-This message is accepted only while the stream is `CLOSING`. On receive, the packet `reason` is ignored and the stream closes with the locally recorded `stream->close_reason`.
+This message is accepted only while the stream is waiting for its locally sent
+close acknowledgment. On receive, the packet `reason` is ignored and the
+stream closes with the locally recorded `stream->close_reason`.
 
 Stream close retransmission uses the stream `ctrl_timeout_ms` and `close_retries`. Default values:
 
@@ -260,24 +315,9 @@ Stream close retransmission uses the stream `ctrl_timeout_ms` and `close_retries
 | --- | --- |
 | `ctrl_timeout_ms` | `600ms` |
 | `close_retries` | `1` |
+| `drain_timeout_ms` | `5000ms` |
 
-## Errors And Close Reasons
-
-### Common Input Errors
-
-| Case | Return |
-| --- | --- |
-| Null parameter or zero length | `-KCPMUX_ERR_INVALID_PARAM` |
-| Unknown message type | `-KCPMUX_ERR_INVALID_FORMAT` |
-| Truncated message | `-KCPMUX_ERR_INVALID_FORMAT` |
-| Extension length exceeds 512 | `-KCPMUX_ERR_INVALID_FORMAT` |
-| Connection or stream not found | `-KCPMUX_ERR_NOT_FOUND` |
-| State mismatch | `KCPMUX_ERR_STATE` |
-| KCP input failure | `KCPMUX_ERR_KCPRET(ret)` |
-
-Note: some state errors return the already-negative constant `KCPMUX_ERR_STATE = -200`, while format errors usually return `-KCPMUX_ERR_INVALID_FORMAT`.
-
-### Close Reasons
+## Close Reasons
 
 | Reason | Value | Meaning |
 | --- | --- | --- |
@@ -288,13 +328,3 @@ Note: some state errors return the already-negative constant `KCPMUX_ERR_STATE =
 | `IDLE` | `0x04` | Idle close |
 | `TIMEOUT` | `0x05` | Timeout close |
 | `REPLACED` | `0x06` | Superseded by a new connection generation |
-
-## Implementation Notes
-
-- Connection lookup starts from the lower-layer peer address; the 24-bit generation then isolates stale packets from replaced connections.
-- Connection-level receive statistics are updated only after an existing connection is found. An unknown peer's initial `CONN_CONNECT` is not counted in that connection's stats before the connection is created.
-- Passive connection creation depends on `conn_connect_notify`. If that callback is NULL, the current implementation creates a connection but defaults to `KCPMUX_ACK_RESULT_ERROR`, then sends a reject ACK and frees the connection.
-- `KEEPALIVE` is a one-way heartbeat packet; the peer is not required to reply with the same sequence number.
-- `STREAM_CLOSE` does not auto-create unknown streams. Only `STREAM_PAYLOAD` can trigger passive stream creation.
-- The `reason` carried by control ACK packets is mainly echoed back. Close completion uses the locally recorded close reason.
-- `idle_timeout_ms` is based on received payload time, not on arbitrary control packets or locally sent data.
