@@ -77,6 +77,46 @@ void kcpmux_stream_config_init(kcpmux_stream_config_t *config)
     config->batch_threshold       = KCPMUX_DEFAULT_BATCH_THRESHOLD;
 }
 
+int kcpmux_conn_config_prepare(
+    kcpmux_conn_config_t *dst,
+    const kcpmux_conn_config_t *src)
+{
+    if (!dst || !src || src->ctrl_timeout_ms == 0) return 0;
+    *dst = *src;
+    if (dst->keepalive_timeout_ms == 0) {
+        dst->keepalive_timeout_ms = KCPMUX_DEFAULT_KEEPALIVE_TIMEOUT_MS;
+    }
+    return 1;
+}
+
+int kcpmux_stream_config_prepare(
+    kcpmux_stream_config_t *dst,
+    const kcpmux_stream_config_t *src)
+{
+    if (!dst || !src || src->ctrl_timeout_ms == 0 ||
+        src->kcp_mss == 0 ||
+        src->kcp_mss > KCPMUX_PROTO_MSG_MAX_LEN - 8 - KCPMUX_IKCP_OVERHEAD ||
+        src->send_pause_threshold == 0 ||
+        src->send_resume_threshold > src->send_pause_threshold) {
+        return 0;
+    }
+    *dst = *src;
+    return 1;
+}
+
+static int kcpmux_engine_callbacks_valid(const kcpmux_engine_callbacks_t *callbacks)
+{
+    return callbacks && callbacks->set_timer && callbacks->write_socket &&
+        callbacks->monotonic_time_ms;
+}
+
+static int kcpmux_kcp_ops_valid(const kcpmux_kcp_ops_t *ops)
+{
+    return ops && ops->create && ops->release && ops->setmss && ops->setoutput &&
+        ops->send && ops->input && ops->recv && ops->peeksize && ops->waitsnd &&
+        ops->update && ops->check && ops->current && ops->current_update;
+}
+
 // ============================================================================
 // Engine lifecycle
 // ============================================================================
@@ -89,7 +129,26 @@ kcpmux_engine_t *kcpmux_engine_create(
     void *user_data,
     const kcpmux_kcp_ops_t *kcp_ops)
 {
-    if (!callbacks) return NULL;
+    if (!kcpmux_engine_callbacks_valid(callbacks)) return NULL;
+
+    const kcpmux_kcp_ops_t *selected_kcp_ops = kcp_ops
+        ? kcp_ops
+        : kcpmux_default_kcp_ops();
+    if (!kcpmux_kcp_ops_valid(selected_kcp_ops)) return NULL;
+
+    kcpmux_conn_config_t conn_config;
+    if (default_conn_config) {
+        if (!kcpmux_conn_config_prepare(&conn_config, default_conn_config)) return NULL;
+    } else {
+        kcpmux_conn_config_init(&conn_config);
+    }
+
+    kcpmux_stream_config_t stream_config;
+    if (default_stream_config) {
+        if (!kcpmux_stream_config_prepare(&stream_config, default_stream_config)) return NULL;
+    } else {
+        kcpmux_stream_config_init(&stream_config);
+    }
 
     kcpmux_engine_t *engine = (kcpmux_engine_t *)malloc(sizeof(kcpmux_engine_t));
     if (!engine) return NULL;
@@ -110,25 +169,13 @@ kcpmux_engine_t *kcpmux_engine_create(
     }
 
     // Default conn config
-    if (default_conn_config) {
-        engine->default_conn_config = *default_conn_config;
-    } else {
-        kcpmux_conn_config_init(&engine->default_conn_config);
-    }
+    engine->default_conn_config = conn_config;
 
     // Default stream config
-    if (default_stream_config) {
-        engine->default_stream_config = *default_stream_config;
-    } else {
-        kcpmux_stream_config_init(&engine->default_stream_config);
-    }
+    engine->default_stream_config = stream_config;
 
     // KCP
-    if (kcp_ops) {
-        engine->kcp_ops = (kcpmux_kcp_ops_t *)kcp_ops;
-    } else {
-        engine->kcp_ops = kcpmux_default_kcp_ops();
-    }
+    engine->kcp_ops = (kcpmux_kcp_ops_t *)selected_kcp_ops;
 
     // Callbacks
     engine->callbacks = *callbacks;

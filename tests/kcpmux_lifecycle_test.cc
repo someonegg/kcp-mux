@@ -88,6 +88,24 @@ TEST(kcpmux_lifecycle, engine_create_null_callbacks) {
     EXPECT_EQ(engine, nullptr);
 }
 
+TEST(kcpmux_lifecycle, engine_create_rejects_incomplete_dependencies) {
+    TestContext ctx;
+    kcpmux_engine_callbacks_t callbacks{};
+    callbacks.set_timer = test_set_timer;
+    callbacks.write_socket = test_write_socket;
+    callbacks.monotonic_time_ms = test_monotonic_time_ms;
+
+    kcpmux_engine_callbacks_t incomplete_callbacks = callbacks;
+    incomplete_callbacks.monotonic_time_ms = nullptr;
+    EXPECT_EQ(kcpmux_engine_create(
+        nullptr, nullptr, nullptr, &incomplete_callbacks, &ctx, nullptr), nullptr);
+
+    kcpmux_kcp_ops_t incomplete_ops = *kcpmux_default_kcp_ops();
+    incomplete_ops.current_update = nullptr;
+    EXPECT_EQ(kcpmux_engine_create(
+        nullptr, nullptr, nullptr, &callbacks, &ctx, &incomplete_ops), nullptr);
+}
+
 TEST(kcpmux_lifecycle, set_timer_zero_requests_async_update) {
     TestContext ctx;
     ctx.current_time_ms = 1000;
@@ -241,6 +259,107 @@ TEST(kcpmux_lifecycle, engine_config_default_values) {
     EXPECT_EQ(stream_config.ctrl_timeout_ms, KCPMUX_DEFAULT_SCONTROL_TIMEOUT_MS);
     EXPECT_EQ(stream_config.close_retries, KCPMUX_DEFAULT_SCLOSE_RETRIES);
     EXPECT_EQ(stream_config.batch_threshold, KCPMUX_DEFAULT_BATCH_THRESHOLD);
+}
+
+TEST(kcpmux_lifecycle, engine_prepares_and_validates_default_configs) {
+    TestContext ctx;
+    kcpmux_engine_callbacks_t callbacks{};
+    callbacks.set_timer = test_set_timer;
+    callbacks.write_socket = test_write_socket;
+    callbacks.monotonic_time_ms = test_monotonic_time_ms;
+
+    kcpmux_conn_config_t conn_config;
+    kcpmux_conn_config_init(&conn_config);
+    conn_config.keepalive_timeout_ms = 0;
+
+    kcpmux_stream_config_t stream_config;
+    kcpmux_stream_config_init(&stream_config);
+    stream_config.kcp_mss = 1468;
+
+    kcpmux_engine_t *engine = kcpmux_engine_create(
+        nullptr, &conn_config, &stream_config, &callbacks, &ctx, nullptr);
+    ASSERT_NE(engine, nullptr);
+    EXPECT_EQ(engine->default_conn_config.keepalive_timeout_ms,
+              KCPMUX_DEFAULT_KEEPALIVE_TIMEOUT_MS);
+    EXPECT_EQ(engine->default_stream_config.kcp_mss, 1468);
+    kcpmux_engine_destroy(engine);
+
+    conn_config.ctrl_timeout_ms = 0;
+    EXPECT_EQ(kcpmux_engine_create(
+        nullptr, &conn_config, nullptr, &callbacks, &ctx, nullptr), nullptr);
+
+    kcpmux_conn_config_init(&conn_config);
+    stream_config.kcp_mss = 1469;
+    EXPECT_EQ(kcpmux_engine_create(
+        nullptr, &conn_config, &stream_config, &callbacks, &ctx, nullptr), nullptr);
+}
+
+TEST(kcpmux_lifecycle, stream_config_validation_boundaries) {
+    kcpmux_stream_config_t source;
+    kcpmux_stream_config_init(&source);
+    kcpmux_stream_config_t prepared;
+
+    source.kcp_mss = 1;
+    EXPECT_TRUE(kcpmux_stream_config_prepare(&prepared, &source));
+    source.kcp_mss = 1468;
+    EXPECT_TRUE(kcpmux_stream_config_prepare(&prepared, &source));
+    source.kcp_mss = 0;
+    EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
+    source.kcp_mss = 1469;
+    EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
+
+    kcpmux_stream_config_init(&source);
+    source.ctrl_timeout_ms = 0;
+    EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
+    kcpmux_stream_config_init(&source);
+    source.send_pause_threshold = 0;
+    EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
+    kcpmux_stream_config_init(&source);
+    source.send_resume_threshold = source.send_pause_threshold + 1;
+    EXPECT_FALSE(kcpmux_stream_config_prepare(&prepared, &source));
+}
+
+TEST(kcpmux_lifecycle, config_setters_reject_invalid_and_keep_stream_mss) {
+    TestContext ctx;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    TestAddr addr(0x7f000001, 12345);
+    kcpmux_conn_t *conn = create_connected_conn(engine, addr.get());
+    ASSERT_NE(conn, nullptr);
+
+    kcpmux_conn_config_t conn_config = conn->config;
+    conn_config.keepalive_timeout_ms = 0;
+    kcpmux_conn_set_config(conn, &conn_config);
+    EXPECT_EQ(conn->config.keepalive_timeout_ms,
+              KCPMUX_DEFAULT_KEEPALIVE_TIMEOUT_MS);
+    kcpmux_conn_config_t accepted_conn_config = conn->config;
+    conn_config.ctrl_timeout_ms = 0;
+    kcpmux_conn_set_config(conn, &conn_config);
+    EXPECT_EQ(memcmp(&conn->config, &accepted_conn_config, sizeof(conn->config)), 0);
+    TestAddr other_addr(0x7f000001, 12346);
+    EXPECT_EQ(kcpmux_conn_connect(
+        engine, other_addr.get(), &conn_config, nullptr, nullptr, nullptr), nullptr);
+
+    kcpmux_stream_t *stream = kcpmux_stream_create(conn, nullptr, nullptr, nullptr);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_stream_config_t stream_config = stream->config;
+    stream_config.kcp_mss = 1000;
+    stream_config.batch_threshold = 4;
+    kcpmux_stream_set_config(stream, &stream_config);
+    EXPECT_EQ(stream->config.kcp_mss, KCPMUX_DEFAULT_KCP_MSS);
+    EXPECT_EQ(stream->config.batch_threshold, 4u);
+
+    kcpmux_stream_config_t accepted_stream_config = stream->config;
+    stream_config.send_pause_threshold = 0;
+    kcpmux_stream_set_config(stream, &stream_config);
+    EXPECT_EQ(memcmp(
+        &stream->config, &accepted_stream_config, sizeof(stream->config)), 0);
+
+    stream_config = accepted_stream_config;
+    stream_config.send_resume_threshold = stream_config.send_pause_threshold + 1;
+    EXPECT_EQ(kcpmux_stream_create(conn, &stream_config, nullptr, nullptr), nullptr);
+
+    kcpmux_engine_destroy(engine);
 }
 
 // ============================================================================

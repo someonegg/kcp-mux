@@ -51,6 +51,14 @@ struct kcpmux_engine_s {
     list_head                 pending_release_list;
 };
 
+// Copy, normalize, and validate public configurations.
+int kcpmux_conn_config_prepare(
+    kcpmux_conn_config_t *dst,
+    const kcpmux_conn_config_t *src);
+int kcpmux_stream_config_prepare(
+    kcpmux_stream_config_t *dst,
+    const kcpmux_stream_config_t *src);
+
 // ============================================================================
 // Engine internal functions
 // ============================================================================

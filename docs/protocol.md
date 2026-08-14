@@ -118,6 +118,8 @@ Default values:
 | `keepalive_timeout_ms` | `30000ms` |
 
 If a `CONNECTED` connection has not received any packet for `keepalive_timeout_ms`, it enters `ERROR` and closes with `TIMEOUT`.
+`ctrl_timeout_ms` must be nonzero. A zero `keepalive_timeout_ms` uses the
+default `30000ms`; a zero keepalive interval still disables keepalive sends.
 
 ### `CONN_CLOSE`
 
@@ -198,6 +200,9 @@ Send path:
 3. The KCP output callback adds the 8-byte KCPMUX header to each KCP segment: `type(1) + generation_id(3) + stream_id(4)`.
 4. The packet is sent to the lower layer through the `write_socket` callback.
 
+If the input exceeds `kcp_mss`, one `send` creates multiple KCP messages, so it
+does not correspond to one `recv`.
+
 KCP update batching is controlled per stream by `batch_threshold`. Values `0`
 and `1` preserve immediate scheduling. Values greater than `1` count successful
 non-flushing sends and payload inputs together; reaching the threshold schedules
@@ -219,6 +224,9 @@ Packet size limits:
 - Total `STREAM_PAYLOAD` length cannot exceed 1500.
 - The KCPMUX header is 8 bytes, so one wrapped KCP segment can carry at most 1492 bytes.
 - The default `kcp_mss` is `1200`; KCP's own header overhead is defined as 24 bytes.
+- `kcp_mss` must be `1..1468` and is fixed when the stream is created.
+- `send_pause_threshold` must be nonzero, and `send_resume_threshold` must not
+  exceed it.
 
 ## Stream Close
 

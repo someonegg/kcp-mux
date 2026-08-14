@@ -100,12 +100,12 @@ kcpmux_stream_t *kcpmux_stream_new(
     stream->conn = conn;
 
     // Config
-    if (config) {
-        stream->config = *config;
-    } else {
-        // Use engine's default stream config
-        kcpmux_engine_t *engine = conn->engine;
-        stream->config = engine->default_stream_config;
+    const kcpmux_stream_config_t *source = config
+        ? config
+        : &conn->engine->default_stream_config;
+    if (!kcpmux_stream_config_prepare(&stream->config, source)) {
+        free(stream);
+        return NULL;
     }
 
     // Create KCP instance
@@ -278,8 +278,10 @@ void kcpmux_stream_set_config(kcpmux_stream_t *stream, const kcpmux_stream_confi
 {
     if (!stream || !config || stream->internal_closed) return;
 
-    // Directly replace the entire config structure
-    stream->config = *config;
+    kcpmux_stream_config_t prepared;
+    if (!kcpmux_stream_config_prepare(&prepared, config)) return;
+    prepared.kcp_mss = stream->config.kcp_mss;
+    stream->config = prepared;
     kcpmux_stream_clear_pending(stream);
     kcpmux_stream_refresh_timer(stream, kcpmux_engine_now(stream->conn->engine));
 }
@@ -293,6 +295,8 @@ void kcpmux_stream_set_callbacks(
 
     if (callbacks) {
         stream->callbacks = *callbacks;
+    } else {
+        memset(&stream->callbacks, 0, sizeof(stream->callbacks));
     }
     stream->user_data = user_data;
 }

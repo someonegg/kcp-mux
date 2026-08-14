@@ -35,25 +35,9 @@ typedef struct kcpmux_addr_s {
 // Common status codes kept local so kcpmux remains standalone.
 #define KCPMUX_ERR_OK                        0
 #define KCPMUX_ERR_NOK                       1
-#define KCPMUX_ERR_TIMEOUT                   2
-#define KCPMUX_ERR_CANCEL                    3
-#define KCPMUX_ERR_READY                     4
-#define KCPMUX_ERR_QUIT                      5
-#define KCPMUX_ERR_SKIP                      6
-#define KCPMUX_ERR_OVERFLOW                  7
 #define KCPMUX_ERR_OOM                       8
-#define KCPMUX_ERR_EOF                       9
 #define KCPMUX_ERR_NOT_FOUND                 10
-#define KCPMUX_ERR_DUP                       11
-#define KCPMUX_ERR_PARTIAL                   12
-#define KCPMUX_ERR_NREADY                    13
-#define KCPMUX_ERR_IDLE                      14
-#define KCPMUX_ERR_CORRUPTED                 15
-#define KCPMUX_ERR_TBD                       16
-#define KCPMUX_ERR_EAGAIN                    17
-#define KCPMUX_ERR_REDIRECT                  18
 #define KCPMUX_ERR_NETWORK                   19
-#define KCPMUX_ERR_NIL_PTR                   40
 #define KCPMUX_ERR_INVALID_FORMAT            41
 #define KCPMUX_ERR_INVALID_PARAM             42
 
@@ -143,13 +127,13 @@ typedef struct kcpmux_engine_config_s {
 
 typedef struct kcpmux_conn_config_s {
     // Control Message
-    uint32_t ctrl_timeout_ms;         // Control Message timeout
+    uint32_t ctrl_timeout_ms;         // Control timeout; must be nonzero
     uint32_t connect_retries;         // Connect retries
     uint32_t close_retries;           // Retransmissions after the initial CLOSE
 
     // Keepalive
     uint32_t keepalive_interval_ms;   // Heartbeat interval (0 disables sending)
-    uint32_t keepalive_timeout_ms;    // Heartbeat response timeout
+    uint32_t keepalive_timeout_ms;    // Receive timeout; 0 uses the 30s default
 
     // Idle management
     uint32_t idle_timeout_ms;         // Idle timeout (close if no data)
@@ -157,14 +141,14 @@ typedef struct kcpmux_conn_config_s {
 
 typedef struct kcpmux_stream_config_s {
     // Control Message
-    uint32_t ctrl_timeout_ms;         // Control Message timeout
+    uint32_t ctrl_timeout_ms;         // Control timeout; must be nonzero
     uint32_t close_retries;           // Retransmissions after the initial CLOSE
 
     // KCP parameters
-    uint16_t kcp_mss;                 // MTU = ... + KCPMUX header (8) + KCP header + mss
-    uint32_t send_pause_threshold;    // Pause sending when waitsnd >= this value
-    uint32_t send_resume_threshold;   // Resume sending when waitsnd < this value
-    uint32_t batch_threshold;         // KCP operations before requesting an immediate update
+    uint16_t kcp_mss;                 // KCP payload MSS; 1..1468
+    uint32_t send_pause_threshold;    // Nonzero; block when waitsnd >= this value
+    uint32_t send_resume_threshold;   // Resume below this value; must be <= pause
+    uint32_t batch_threshold;         // KCP operations per update; 0/1 disables batching
 } kcpmux_stream_config_t;
 
 // ============================================================================
@@ -197,7 +181,7 @@ typedef struct kcpmux_engine_stats_s {
     // Stream lifecycle statistics
     uint64_t stream_created_total;   // Stream created total
     uint64_t stream_closed_total;    // Stream closed (internal) total
-    uint64_t stream_opened_total;    // Stream opened total (state changed to OPEN)
+    uint64_t stream_opened_total;    // Streams successfully initialized as OPEN
 
     // API call statistics (counted on every call, regardless of success/failure)
     uint64_t api_conn_connect_calls;   // kcpmux_conn_connect call count

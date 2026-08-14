@@ -70,7 +70,7 @@ list_head *kcpmux_htb_find_lru(kcpmux_htb_t *ht, void *key, uint32_t hash)
 void kcpmux_htb_add(kcpmux_htb_t *ht, list_head *node, void *key, uint32_t hash)
 {
     if (!ht || !node) {
-        assert(!"KCPMUX_ERR_NIL_PTR");
+        assert(!"kcpmux_htb_add received NULL");
     }
 
     if (!kcpmux_htb_find(ht, key, hash)) {
@@ -88,7 +88,7 @@ void kcpmux_htb_add_direct(kcpmux_htb_t *ht, list_head *node, void *key, uint32_
 void kcpmux_htb_del(kcpmux_htb_t *ht, list_head *node)
 {
     if (!ht || !node) {
-        assert(!"KCPMUX_ERR_NIL_PTR");
+        assert(!"kcpmux_htb_del received NULL");
     }
 
     if (!list_empty(node)) {

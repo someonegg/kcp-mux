@@ -120,11 +120,10 @@ kcpmux_conn_t *kcpmux_conn_new(
     conn->peer_addr.addrlen = peer_addr->addrlen;
 
     // Config
-    if (config) {
-        conn->config = *config;
-    } else {
-        // Use engine's default conn config
-        conn->config = engine->default_conn_config;
+    const kcpmux_conn_config_t *source = config ? config : &engine->default_conn_config;
+    if (!kcpmux_conn_config_prepare(&conn->config, source)) {
+        free(conn);
+        return NULL;
     }
 
     // Initiators use odd stream IDs and acceptors use even stream IDs.
@@ -335,8 +334,9 @@ void kcpmux_conn_set_config(kcpmux_conn_t *conn, const kcpmux_conn_config_t *con
 {
     if (!conn || !config || conn->internal_closed) return;
 
-    // Directly replace the entire config structure
-    conn->config = *config;
+    kcpmux_conn_config_t prepared;
+    if (!kcpmux_conn_config_prepare(&prepared, config)) return;
+    conn->config = prepared;
     kcpmux_conn_refresh_timer(conn, kcpmux_engine_now(conn->engine));
 }
 
@@ -349,6 +349,8 @@ void kcpmux_conn_set_callbacks(
 
     if (callbacks) {
         conn->callbacks = *callbacks;
+    } else {
+        memset(&conn->callbacks, 0, sizeof(conn->callbacks));
     }
     conn->user_data = user_data;
 }
