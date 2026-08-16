@@ -43,9 +43,9 @@ void demo_endpoint_cleanup(demo_endpoint_t *endpoint);
 int demo_endpoint_poll(demo_endpoint_t *endpoint, int max_wait_ms);
 
 void demo_set_timer(uint64_t wake_after_ms, void *user_data);
-int demo_write_socket(
-    const uint8_t *buf,
-    unsigned size,
+int demo_write_socketv(
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
     const kcpmux_addr_t *addr,
     void *user_data);
 int64_t demo_engine_time_ms(void *user_data);

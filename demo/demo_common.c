@@ -210,7 +210,7 @@ int demo_endpoint_init(
     }
 
     callbacks->set_timer = demo_set_timer;
-    callbacks->write_socket = demo_write_socket;
+    callbacks->write_socketv = demo_write_socketv;
     callbacks->log_write = demo_log_write;
     callbacks->monotonic_time_ms = demo_engine_time_ms;
 
@@ -322,19 +322,32 @@ void demo_set_timer(uint64_t wake_after_ms, void *user_data)
     }
 }
 
-int demo_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data)
+int demo_write_socketv(
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
+    const kcpmux_addr_t *addr,
+    void *user_data)
 {
     demo_endpoint_t *endpoint = (demo_endpoint_t *)user_data;
     struct sockaddr_in peer;
+    uint8_t packet[1500];
+    unsigned size = 0;
+    unsigned i;
     ssize_t sent;
 
-    if (endpoint == NULL || endpoint->fd < 0 || buf == NULL
+    if (endpoint == NULL || endpoint->fd < 0 || iov == NULL || iovcnt == 0
         || demo_kcpmux_addr_to_sockaddr(addr, &peer) != 0)
     {
         return 0;
     }
 
-    sent = sendto(endpoint->fd, buf, size, 0, (const struct sockaddr *)&peer, sizeof(peer));
+    for (i = 0; i < iovcnt; i++) {
+        if (iov[i].len > sizeof(packet) - size) return 0;
+        memcpy(packet + size, iov[i].data, iov[i].len);
+        size += iov[i].len;
+    }
+
+    sent = sendto(endpoint->fd, packet, size, 0, (const struct sockaddr *)&peer, sizeof(peer));
     return sent == (ssize_t)size ? 1 : 0;
 }
 

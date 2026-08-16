@@ -9,6 +9,7 @@ caller keeps control of the underlying packet I/O, timers, and event loop.
 - connection handshake with optional protocol extension data
 - multiple independent streams over one peer connection
 - stream read/write notifications and close notifications
+- vectored stream input and vectored transport output
 - keepalive, idle timeout, and retry configuration
 - per-engine, per-connection, and per-stream statistics
 - pluggable KCP operations, with a bundled default KCP implementation
@@ -80,6 +81,7 @@ connection/stream state behavior.
 
 - [Use an indexed binary min-heap for kcpmux deadlines](docs/adr/0001-use-indexed-min-heap-for-kcpmux-deadlines.md)
 - [Reject out-of-order unknown peer stream IDs](docs/adr/0002-reject-out-of-order-unknown-peer-stream-ids.md)
+- [Use vectored handoffs at send-path ownership boundaries](docs/adr/0003-use-vectored-send-path-handoffs.md)
 
 ## License
 

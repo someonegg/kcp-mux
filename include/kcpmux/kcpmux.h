@@ -16,9 +16,11 @@ void kcpmux_stream_config_init(kcpmux_stream_config_t *config);
 
 // Engine API
 
-// callbacks, set_timer, and monotonic_time_ms are required. write_socket is
+// callbacks, set_timer, write_socketv, and monotonic_time_ms are required.
 // required for transport; log_write and conn_connect_notify are optional. A
-// custom kcp_ops must provide every operation. Invalid defaults return NULL.
+// custom kcp_ops must provide every required operation; sendv is optional and
+// uses an MSS-sized scalar-send fallback when absent. The operations table is
+// copied during creation. Invalid defaults return NULL.
 kcpmux_engine_t *kcpmux_engine_create(
     const kcpmux_engine_config_t *config,
     const kcpmux_conn_config_t *default_conn_config,
@@ -130,9 +132,23 @@ void kcpmux_stream_set_callbacks(
 
 // Sends data, splitting input larger than kcp_mss into multiple KCP messages;
 // in that case one send does not correspond to one recv.
-// A nonzero flush requests immediate output. Returns bytes sent, 0 when write
-// blocked, or a negative error code.
+// A nonzero flush requests immediate output. When flush is nonzero, buf may be
+// NULL and size may be zero to request an update without sending data. Returns
+// bytes sent, 0 for a flush-only call or when write blocked, or a negative error
+// code.
 int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int flush);
+
+// Sends the flattened iovec, ignoring fragment boundaries and splitting input
+// larger than kcp_mss exactly like kcpmux_stream_send(). Empty fragments are
+// skipped. A nonzero flush requests immediate output. When flush is nonzero,
+// iov may be NULL and iovcnt may be zero (or all fragments may be empty) to
+// request an update without sending data. Returns bytes sent, 0 for a
+// flush-only call or when write blocked, or a negative error code.
+int kcpmux_stream_sendv(
+    kcpmux_stream_t *stream,
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
+    int flush);
 
 // Requests an immediate KCP update for operations accumulated below the stream
 // batch threshold. Does nothing when the stream has no pending operations.

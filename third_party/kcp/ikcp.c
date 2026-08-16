@@ -372,7 +372,7 @@ void ikcp_release(ikcpcb *kcp)
 // set output callback, which will be invoked by kcp
 //---------------------------------------------------------------------
 void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len,
-    ikcpcb *kcp, void *user))
+    void *kcp, void *user))
 {
     kcp->output = output;
 }
@@ -572,6 +572,114 @@ int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
         if (buffer) {
             buffer += size;
         }
+        len -= size;
+        sent += size;
+    }
+
+    return sent;
+}
+
+
+//---------------------------------------------------------------------
+// vectored user/upper level send, returns below zero for error
+//---------------------------------------------------------------------
+typedef struct IKCPIOVCURSOR {
+    const kcpmux_iovec_t *iov;
+    unsigned index;
+    unsigned offset;
+} IKCPIOVCURSOR;
+
+static void ikcp_iov_copy(IKCPIOVCURSOR *cursor, char *dest, int len)
+{
+    while (len > 0) {
+        const kcpmux_iovec_t *item = &cursor->iov[cursor->index];
+        unsigned available = item->len - cursor->offset;
+        unsigned take = available < (unsigned)len ? available : (unsigned)len;
+
+        if (take > 0) {
+            memcpy(dest, item->data + cursor->offset, take);
+            dest += take;
+            len -= (int)take;
+            cursor->offset += take;
+        }
+        if (cursor->offset == item->len) {
+            cursor->index++;
+            cursor->offset = 0;
+        }
+    }
+}
+
+int ikcp_sendv(ikcpcb *kcp, const kcpmux_iovec_t *iov, unsigned iovcnt,
+    unsigned first_offset, int len)
+{
+    IKCPIOVCURSOR cursor;
+    IKCPSEG *seg;
+    size_t available = 0;
+    int count, i;
+    unsigned j;
+    int sent = 0;
+
+    assert(kcp->mss > 0);
+    if (len < 0) return -1;
+    if (len == 0) return ikcp_send(kcp, NULL, 0);
+    if (iov == NULL || iovcnt == 0 || first_offset > iov[0].len) return -1;
+
+    for (j = 0; j < iovcnt; j++) {
+        unsigned offset = j == 0 ? first_offset : 0;
+        if (iov[j].len > 0 && iov[j].data == NULL) return -1;
+        available += iov[j].len - offset;
+        if (available >= (size_t)len) break;
+    }
+    if (available < (size_t)len) return -1;
+
+    cursor.iov = iov;
+    cursor.index = 0;
+    cursor.offset = first_offset;
+
+    // append to previous segment in streaming mode (if possible)
+    if (kcp->stream != 0) {
+        if (!iqueue_is_empty(&kcp->snd_queue)) {
+            IKCPSEG *old = iqueue_entry(kcp->snd_queue.prev, IKCPSEG, node);
+            if (old->len < kcp->mss) {
+                int capacity = kcp->mss - old->len;
+                int extend = (len < capacity)? len : capacity;
+                seg = ikcp_segment_new(kcp, old->len + extend);
+                assert(seg);
+                if (seg == NULL) return -2;
+                iqueue_add_tail(&seg->node, &kcp->snd_queue);
+                memcpy(seg->data, old->data, old->len);
+                ikcp_iov_copy(&cursor, seg->data + old->len, extend);
+                seg->len = old->len + extend;
+                seg->frg = 0;
+                len -= extend;
+                iqueue_del_init(&old->node);
+                ikcp_segment_delete(kcp, old);
+                sent = extend;
+            }
+        }
+        if (len <= 0) return sent;
+    }
+
+    if (len <= (int)kcp->mss) count = 1;
+    else count = (len + kcp->mss - 1) / kcp->mss;
+
+    if (count >= (int)IKCP_WND_RCV) {
+        if (kcp->stream != 0 && sent > 0) return sent;
+        return -2;
+    }
+    if (count == 0) count = 1;
+
+    for (i = 0; i < count; i++) {
+        int size = len > (int)kcp->mss ? (int)kcp->mss : len;
+        seg = ikcp_segment_new(kcp, size);
+        assert(seg);
+        if (seg == NULL) return -2;
+        if (len > 0) ikcp_iov_copy(&cursor, seg->data, size);
+        seg->len = size;
+        seg->frg = (kcp->stream == 0)? (count - i - 1) : 0;
+        iqueue_init(&seg->node);
+        iqueue_add_tail(&seg->node, &kcp->snd_queue);
+        kcp->nsnd_que++;
         len -= size;
         sent += size;
     }

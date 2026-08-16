@@ -53,6 +53,7 @@ struct FakeKcpContext {
     kcpmux_addr_t peer_addr{};
     std::vector<char> lifecycle_events;
     std::vector<std::vector<uint8_t>> sent_packets;
+    std::vector<std::vector<uint8_t>> kcp_sends;
     std::vector<FakeKcp *> instances;
 };
 
@@ -94,9 +95,8 @@ static void fake_setoutput(void *kcp, int (*output)(const char *, int, void *, v
 
 static int fake_send(void *kcp, const char *buf, int len)
 {
-    (void)kcp;
-    (void)buf;
-    (void)len;
+    auto *fake = static_cast<FakeKcp *>(kcp);
+    fake->context->kcp_sends.emplace_back(buf, buf + len);
     return 0;
 }
 
@@ -172,6 +172,7 @@ static kcpmux_kcp_ops_t fake_ops = {
     fake_check,
     fake_current,
     fake_current_update,
+    nullptr,
 };
 
 static void fake_set_timer(uint64_t wake_after_ms, void *user_data)
@@ -179,17 +180,19 @@ static void fake_set_timer(uint64_t wake_after_ms, void *user_data)
     static_cast<FakeKcpContext *>(user_data)->last_timer_ms = wake_after_ms;
 }
 
-static int fake_write_socket(
-    const uint8_t *buf,
-    unsigned size,
+static int fake_write_socketv(
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
     const kcpmux_addr_t *addr,
     void *user_data)
 {
-    (void)buf;
-    (void)size;
+    std::vector<uint8_t> packet;
     (void)addr;
     auto *context = static_cast<FakeKcpContext *>(user_data);
-    context->sent_packets.emplace_back(buf, buf + size);
+    for (unsigned i = 0; i < iovcnt; i++) {
+        packet.insert(packet.end(), iov[i].data, iov[i].data + iov[i].len);
+    }
+    context->sent_packets.push_back(std::move(packet));
     return 1;
 }
 
@@ -251,7 +254,7 @@ protected:
     void SetUp() override {
         kcpmux_engine_callbacks_t callbacks{};
         callbacks.set_timer = fake_set_timer;
-        callbacks.write_socket = fake_write_socket;
+        callbacks.write_socketv = fake_write_socketv;
         callbacks.monotonic_time_ms = fake_now;
 
         kcpmux_conn_config_t config;
@@ -332,6 +335,31 @@ TEST_F(kcpmux_stream_timer, only_due_stream_is_touched) {
     EXPECT_EQ(context.total_check_calls, 1);
     EXPECT_EQ(static_cast<FakeKcp *>(streams.front()->kcp)->update_calls, 1);
     EXPECT_EQ(static_cast<FakeKcp *>(streams.back()->kcp)->update_calls, 0);
+}
+
+TEST_F(kcpmux_stream_timer, sendv_falls_back_to_mss_scratch_for_scalar_kcp) {
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.kcp_mss = 5;
+    kcpmux_stream_t *stream = kcpmux_stream_new(conn, 1, &config, 1);
+    ASSERT_NE(stream, nullptr);
+    kcpmux_conn_add_stream(conn, stream);
+
+    const uint8_t header[] = {'H', 'D'};
+    const uint8_t payload[] = {'0', '1', '2', '3', '4', '5', '6'};
+    kcpmux_iovec_t iov[] = {
+        {nullptr, 0},
+        {header, sizeof(header)},
+        {payload, sizeof(payload)},
+    };
+
+    ASSERT_EQ(fake_ops.sendv, nullptr);
+    ASSERT_EQ(kcpmux_stream_sendv(stream, iov, 3, 0), 9);
+    ASSERT_EQ(context.kcp_sends.size(), 2u);
+    EXPECT_EQ(context.kcp_sends[0],
+              (std::vector<uint8_t>{'H', 'D', '0', '1', '2'}));
+    EXPECT_EQ(context.kcp_sends[1],
+              (std::vector<uint8_t>{'3', '4', '5', '6'}));
 }
 
 TEST_F(kcpmux_stream_timer, passive_stream_accept_processes_first_payload) {
@@ -468,7 +496,7 @@ TEST_F(kcpmux_stream_timer, normal_close_drains_waitsnd_before_close_control) {
     ASSERT_EQ(kcpmux_stream_close(stream), 0);
     EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_LOCAL_DRAIN);
     EXPECT_TRUE(context.sent_packets.empty());
-    EXPECT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), KCPMUX_ERR_STATE);
+    EXPECT_EQ(kcpmux_stream_send(stream, &byte, 1, 0), -KCPMUX_ERR_STATE);
 
     kcpmux_engine_update(engine);
     EXPECT_TRUE(context.sent_packets.empty());
@@ -556,7 +584,7 @@ TEST_F(kcpmux_stream_timer, wait_close_ack_stops_processing_kcp_payloads) {
 
     EXPECT_EQ(kcpmux_engine_input(
                   engine, payload.data(), payload.size(), &context.peer_addr),
-              KCPMUX_ERR_STATE);
+              -KCPMUX_ERR_STATE);
     EXPECT_EQ(context.total_input_calls, input_calls);
 }
 
@@ -773,7 +801,7 @@ TEST_F(kcpmux_stream_timer, rejected_and_invalid_first_payloads_consume_peer_id)
     auto invalid = build_stream_payload(4, kcp_payload, sizeof(kcp_payload), conn->generation_id);
     EXPECT_EQ(kcpmux_engine_input(
                   engine, invalid.data(), invalid.size(), &context.peer_addr),
-              KCPMUX_ERR_KCPRET(-7));
+              -KCPMUX_ERR_KCPRET(-7));
     EXPECT_EQ(conn->latest_peer_stream_id, 4u);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 4), nullptr);
     EXPECT_EQ(kcpmux_engine_input(
@@ -928,7 +956,7 @@ TEST_F(kcpmux_stream_timer, recv_preserves_readable_state_for_small_buffer_and_e
 
     EXPECT_EQ(kcpmux_stream_peek_size(stream), 8);
     EXPECT_EQ(kcpmux_stream_recv(stream, buffer, 4),
-              KCPMUX_ERR_BUFFER_TOO_SMALL);
+              -KCPMUX_ERR_BUFFER_TOO_SMALL);
     EXPECT_EQ(stream->read_blocked, 0);
     EXPECT_EQ(stream->stats.read_block_count, block_count);
     EXPECT_EQ(kcpmux_stream_peek_size(stream), 8);
@@ -947,7 +975,7 @@ TEST_F(kcpmux_stream_timer, recv_preserves_readable_state_for_small_buffer_and_e
     context.peek_result = 4;
     context.recv_result = -9;
     EXPECT_EQ(kcpmux_stream_recv(stream, buffer, sizeof(buffer)),
-              KCPMUX_ERR_KCPRET(-9));
+              -KCPMUX_ERR_KCPRET(-9));
     EXPECT_EQ(stream->read_blocked, 0);
     EXPECT_EQ(stream->stats.read_block_count, block_count + 1);
 }
@@ -958,14 +986,14 @@ TEST_F(kcpmux_stream_timer, peek_size_reports_state_errors) {
 
     EXPECT_EQ(kcpmux_stream_peek_size(nullptr), -KCPMUX_ERR_INVALID_PARAM);
     kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);
-    EXPECT_EQ(kcpmux_stream_peek_size(stream), KCPMUX_ERR_STATE);
+    EXPECT_EQ(kcpmux_stream_peek_size(stream), -KCPMUX_ERR_STATE);
     uint8_t buffer = 0;
     EXPECT_EQ(kcpmux_stream_recv(stream, &buffer, sizeof(buffer)),
-              KCPMUX_ERR_STATE);
+              -KCPMUX_ERR_STATE);
     stream->internal_closed = 1;
-    EXPECT_EQ(kcpmux_stream_peek_size(stream), KCPMUX_ERR_CLOSED);
+    EXPECT_EQ(kcpmux_stream_peek_size(stream), -KCPMUX_ERR_CLOSED);
     EXPECT_EQ(kcpmux_stream_recv(stream, &buffer, sizeof(buffer)),
-              KCPMUX_ERR_CLOSED);
+              -KCPMUX_ERR_CLOSED);
     stream->internal_closed = 0;
 }
 
@@ -1017,6 +1045,33 @@ TEST_F(kcpmux_stream_timer, send_flush_modes_have_distinct_scheduling) {
     EXPECT_EQ(context.total_update_calls, 1);
     EXPECT_EQ(context.total_check_calls, 1);
     EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+}
+
+TEST_F(kcpmux_stream_timer, send_and_sendv_can_flush_without_data) {
+    kcpmux_stream_t *stream = NewStream(1);
+    ASSERT_NE(stream, nullptr);
+
+    context.waitsnd_result = static_cast<int>(stream->config.send_pause_threshold);
+    context.check_deadline_ms = 5000;
+    ResetKcpCounts();
+
+    ASSERT_EQ(kcpmux_stream_send(stream, nullptr, 0, 1), 0);
+    EXPECT_EQ(context.total_update_calls, 1);
+    EXPECT_EQ(context.total_check_calls, 1);
+    EXPECT_TRUE(context.kcp_sends.empty());
+    EXPECT_EQ(stream->timer_node.deadline_ms, 5000);
+
+    kcpmux_iovec_t empty[] = {{nullptr, 0}, {nullptr, 0}};
+    ResetKcpCounts();
+    ASSERT_EQ(kcpmux_stream_sendv(stream, empty, 2, 1), 0);
+    EXPECT_EQ(context.total_update_calls, 1);
+    EXPECT_EQ(context.total_check_calls, 1);
+    EXPECT_TRUE(context.kcp_sends.empty());
+
+    ResetKcpCounts();
+    ASSERT_EQ(kcpmux_stream_sendv(stream, nullptr, 0, 1), 0);
+    EXPECT_EQ(context.total_update_calls, 1);
+    EXPECT_EQ(context.total_check_calls, 1);
 }
 
 TEST_F(kcpmux_stream_timer, send_and_input_share_batch_threshold) {

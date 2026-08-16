@@ -120,6 +120,57 @@ TEST_F(kcpmux_data, send_recv_small_data) {
     EXPECT_EQ(std::string((char*)recv_buf, ret), send_data);
 }
 
+TEST_F(kcpmux_data, sendv_flattens_iovecs_and_preserves_mss_messages) {
+    establish_connection();
+    kcpmux_stream_config_t config;
+    kcpmux_stream_config_init(&config);
+    config.kcp_mss = 8;
+    create_streams(&config);
+
+    const uint8_t header[] = {'H', 'D', 'R'};
+    const uint8_t payload[] = {
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b'};
+    kcpmux_iovec_t iov[] = {
+        {nullptr, 0},
+        {header, sizeof(header)},
+        {nullptr, 0},
+        {payload, sizeof(payload)},
+    };
+
+    ASSERT_EQ(kcpmux_stream_sendv(client_stream, iov, 4, 1), 15);
+    pump_kcp(ctx);
+
+    uint8_t first[8]{};
+    uint8_t second[8]{};
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, first, sizeof(first)), 8);
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, second, sizeof(second)), 7);
+    const std::string expected = "HDR0123456789ab";
+    EXPECT_EQ(std::string(reinterpret_cast<char *>(first), 8), expected.substr(0, 8));
+    EXPECT_EQ(std::string(reinterpret_cast<char *>(second), 7), expected.substr(8));
+
+    kcpmux_engine_stats_t stats{};
+    kcpmux_engine_get_stats(ctx.client_engine, &stats);
+    EXPECT_EQ(stats.api_stream_sendv_calls, 1u);
+}
+
+TEST_F(kcpmux_data, sendv_rejects_empty_and_invalid_iovecs) {
+    establish_connection();
+    create_streams();
+
+    kcpmux_iovec_t empty[] = {{nullptr, 0}, {nullptr, 0}};
+    kcpmux_iovec_t invalid[] = {{nullptr, 1}};
+    EXPECT_EQ(kcpmux_stream_sendv(client_stream, empty, 2, 0),
+              -KCPMUX_ERR_INVALID_PARAM);
+    EXPECT_EQ(kcpmux_stream_sendv(client_stream, invalid, 1, 0),
+              -KCPMUX_ERR_INVALID_PARAM);
+    EXPECT_EQ(kcpmux_stream_sendv(client_stream, nullptr, 1, 0),
+              -KCPMUX_ERR_INVALID_PARAM);
+    EXPECT_EQ(kcpmux_stream_sendv(client_stream, nullptr, 0, 0),
+              -KCPMUX_ERR_INVALID_PARAM);
+    EXPECT_EQ(kcpmux_stream_send(client_stream, nullptr, 0, 0),
+              -KCPMUX_ERR_INVALID_PARAM);
+}
+
 TEST_F(kcpmux_data, recv_small_buffer_can_retry_with_peeked_size) {
     establish_connection();
     create_streams();
@@ -140,7 +191,7 @@ TEST_F(kcpmux_data, recv_small_buffer_can_retry_with_peeked_size) {
               static_cast<int>(send_data.size()));
     EXPECT_EQ(kcpmux_stream_recv(
                   server_stream, small_buffer, sizeof(small_buffer)),
-              KCPMUX_ERR_BUFFER_TOO_SMALL);
+              -KCPMUX_ERR_BUFFER_TOO_SMALL);
 
     kcpmux_stream_stats_t after_small{};
     kcpmux_stream_get_stats(server_stream, &after_small);
@@ -271,7 +322,7 @@ TEST_F(kcpmux_data, send_on_non_open_stream) {
         (const uint8_t *)send_data.c_str(),
         send_data.size(),
         1);
-    EXPECT_EQ(ret, KCPMUX_ERR_STATE);  // Should return state error
+    EXPECT_EQ(ret, -KCPMUX_ERR_STATE);  // Should return state error
 }
 
 // ============================================================================

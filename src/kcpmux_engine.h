@@ -23,7 +23,7 @@ struct kcpmux_engine_s {
     kcpmux_engine_callbacks_t  callbacks;       // Engine callbacks
     void                      *user_data;       // User data
 
-    kcpmux_kcp_ops_t          *kcp_ops;         // KCP operations
+    kcpmux_kcp_ops_t           kcp_ops;         // Owned copy of KCP operations
 
     // Default configurations for conn/stream
     kcpmux_conn_config_t       default_conn_config;      // Default conn config
@@ -94,10 +94,10 @@ void kcpmux_engine_queue_release(
 
 // Send data to socket
 // Return: 0 on success, < 0 on error
-int kcpmux_engine_write_socket(
+int kcpmux_engine_write_socketv(
     kcpmux_engine_t *engine,
-    const uint8_t *buf,
-    unsigned size,
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
     const kcpmux_addr_t *addr);
 
 // Add/remove connection

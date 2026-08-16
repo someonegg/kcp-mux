@@ -12,6 +12,8 @@
 #ifndef __IKCP_H__
 #define __IKCP_H__
 
+#include "kcpmux_types.h"
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -25,6 +27,7 @@
 #define ikcp_setlosth       kcpmux_ikcp_setlosth
 #define ikcp_recv           kcpmux_ikcp_recv
 #define ikcp_send           kcpmux_ikcp_send
+#define ikcp_sendv          kcpmux_ikcp_sendv
 #define ikcp_update         kcpmux_ikcp_update
 #define ikcp_check          kcpmux_ikcp_check
 #define ikcp_input          kcpmux_ikcp_input
@@ -339,7 +342,7 @@ struct IKCPCB
     int fastlimit;
     int nocwnd, stream;
     int logmask;
-    int (*output)(const char *buf, int len, struct IKCPCB *kcp, void *user);
+    int (*output)(const char *buf, int len, void *kcp, void *user);
     int (*quotah)(int len, struct IKCPCB *kcp, void *user);
     void (*losth)(struct IKCPCB *kcp, struct IKCPSEG *seg, void *user);
     void (*writelog)(const char *log, struct IKCPCB *kcp, void *user);
@@ -392,7 +395,7 @@ void ikcp_release(ikcpcb *kcp);
 
 // set output callback, which will be invoked by kcp
 void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len,
-    ikcpcb *kcp, void *user));
+    void *kcp, void *user));
 
 void ikcp_setquotah(ikcpcb *kcp, int (*quotah)(int len, ikcpcb *kcp, void *user));
 
@@ -403,6 +406,11 @@ int ikcp_recv(ikcpcb *kcp, char *buffer, int len);
 
 // user/upper level send, returns below zero for error
 int ikcp_send(ikcpcb *kcp, const char *buffer, int len);
+
+// Sends exactly len flattened bytes beginning at first_offset in iov[0].
+// The bytes are copied directly into KCP-owned send segments.
+int ikcp_sendv(ikcpcb *kcp, const kcpmux_iovec_t *iov, unsigned iovcnt,
+    unsigned first_offset, int len);
 
 // update state (call it repeatedly, every 10ms-100ms), or you can ask
 // ikcp_check when to call it again (without ikcp_input/_send calling).
@@ -464,5 +472,3 @@ void ikcp_load(ikcpcb *kcp, ikcprec *rec);
 #endif
 
 #endif
-
-

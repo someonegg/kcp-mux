@@ -12,7 +12,7 @@ extern "C" {
 
 typedef struct kcpmux_kcp_ops_s {
     // Operations are synchronous and must not reenter kcpmux. The installed
-    // output callback may only reach the engine write_socket callback.
+    // output callback may only reach the engine write_socketv callback.
 
     // Creates an opaque KCP instance. engine_user is the engine user data.
     void *(*create)(uint32_t kcp_conv, void *kcp_user, void *engine_user);
@@ -24,7 +24,7 @@ typedef struct kcpmux_kcp_ops_s {
     // Installs the lower-layer output callback.
     void (*setoutput)(void *kcp, int (*output)(const char *buf, int len, void *kcp, void *user));
 
-    // Returns 0 on success or -1 on error.
+    // Returns a nonnegative value on success or a negative value on error.
     int (*send)(void *kcp, const char *buf, int len);
 
     // Returns 0 on success or -1 on error.
@@ -45,6 +45,18 @@ typedef struct kcpmux_kcp_ops_s {
 
     int64_t (*current)(void *kcp);
     void (*current_update)(void *kcp, int64_t current);
+
+    // Optional vectored send. iov points at the current fragment and
+    // first_offset selects the first byte within it. Exactly len flattened
+    // bytes form one KCP message. Returns a nonnegative value on success or a
+    // negative value on error. kcpmux falls back to a contiguous MSS-sized
+    // scratch buffer when this operation is NULL.
+    int (*sendv)(
+        void *kcp,
+        const kcpmux_iovec_t *iov,
+        unsigned iovcnt,
+        unsigned first_offset,
+        int len);
 
 } kcpmux_kcp_ops_t;
 

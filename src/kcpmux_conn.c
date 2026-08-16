@@ -626,7 +626,7 @@ int kcpmux_conn_is_new_peer_stream_id(const kcpmux_conn_t *conn, uint32_t stream
 
 int kcpmux_conn_send_connect(kcpmux_conn_t *conn)
 {
-    if (!conn || conn->internal_closed) return KCPMUX_ERR_CLOSED;
+    if (!conn || conn->internal_closed) return -KCPMUX_ERR_CLOSED;
     conn->last_ctrl_ts = kcpmux_engine_now(conn->engine);
     int ret = kcpmux_protocol_send_conn_connect(conn);
     kcpmux_conn_refresh_timer(conn, conn->last_ctrl_ts);
@@ -640,7 +640,7 @@ int kcpmux_conn_send_connect_ack(kcpmux_conn_t *conn, uint8_t result)
 
 int kcpmux_conn_send_keepalive(kcpmux_conn_t *conn)
 {
-    if (!conn || conn->internal_closed) return KCPMUX_ERR_CLOSED;
+    if (!conn || conn->internal_closed) return -KCPMUX_ERR_CLOSED;
     conn->last_keepalive_ts = kcpmux_engine_now(conn->engine);
     conn->keepalive_seq++;
     int ret = kcpmux_protocol_send_conn_keepalive(conn);
@@ -650,7 +650,7 @@ int kcpmux_conn_send_keepalive(kcpmux_conn_t *conn)
 
 int kcpmux_conn_send_close(kcpmux_conn_t *conn, uint8_t reason)
 {
-    if (!conn || conn->internal_closed) return KCPMUX_ERR_CLOSED;
+    if (!conn || conn->internal_closed) return -KCPMUX_ERR_CLOSED;
     conn->last_ctrl_ts = kcpmux_engine_now(conn->engine);
     int ret = kcpmux_protocol_send_conn_close(conn, reason);
     kcpmux_conn_refresh_timer(conn, conn->last_ctrl_ts);
@@ -664,8 +664,20 @@ int kcpmux_conn_send_close_ack(kcpmux_conn_t *conn, uint8_t reason)
 
 int kcpmux_conn_write_socket(kcpmux_conn_t *conn, const uint8_t *buf, unsigned size)
 {
+    kcpmux_iovec_t iov = {buf, size};
+    return kcpmux_conn_write_socketv(conn, &iov, 1);
+}
+
+int kcpmux_conn_write_socketv(
+    kcpmux_conn_t *conn,
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt)
+{
+    uint64_t size = 0;
+    unsigned i;
     kcpmux_engine_t *engine = conn->engine;
-    int ret = kcpmux_engine_write_socket(engine, buf, size, &conn->peer_addr);
+    int ret = kcpmux_engine_write_socketv(engine, iov, iovcnt, &conn->peer_addr);
+    for (i = 0; i < iovcnt; i++) size += iov[i].len;
     if (ret == 0) {
         conn->stats.tx_packets++;
         conn->stats.tx_bytes += size;

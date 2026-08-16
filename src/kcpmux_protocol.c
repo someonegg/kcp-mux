@@ -153,7 +153,7 @@ int kcpmux_protocol_input(
 
     switch (msg_type) {
     case KCPMUX_MSG_CONN_CONNECT_ACK: {
-        if (!conn || conn->state != KCPMUX_CONN_STATE_CONNECTING) return KCPMUX_ERR_STATE;
+        if (!conn || conn->state != KCPMUX_CONN_STATE_CONNECTING) return -KCPMUX_ERR_STATE;
         if (size < 8) return -KCPMUX_ERR_INVALID_FORMAT;
 
         uint8_t version = buf[4];
@@ -206,7 +206,7 @@ int kcpmux_protocol_input(
     }
 
     case KCPMUX_MSG_CONN_CLOSE_ACK: {
-        if (!conn || conn->state != KCPMUX_CONN_STATE_CLOSING) return KCPMUX_ERR_STATE;
+        if (!conn || conn->state != KCPMUX_CONN_STATE_CLOSING) return -KCPMUX_ERR_STATE;
         if (size < 5) return -KCPMUX_ERR_INVALID_FORMAT;
 
         kcpmux_conn_note_receive(conn, recv_time_ms, 0);
@@ -240,7 +240,7 @@ int kcpmux_protocol_input(
         kcpmux_stream_t *stream = kcpmux_conn_get_stream_by_id(conn, stream_id);
         if (!stream || stream->state != KCPMUX_STREAM_STATE_CLOSING ||
             stream->close_phase != KCPMUX_STREAM_CLOSE_WAIT_ACK) {
-            return KCPMUX_ERR_STATE;
+            return -KCPMUX_ERR_STATE;
         }
 
         kcpmux_conn_note_receive(conn, recv_time_ms, 0);
@@ -251,7 +251,7 @@ int kcpmux_protocol_input(
     }
 
     case KCPMUX_MSG_STREAM_PAYLOAD: {
-        if (!conn || conn->state != KCPMUX_CONN_STATE_CONNECTED) return KCPMUX_ERR_STATE;
+        if (!conn || conn->state != KCPMUX_CONN_STATE_CONNECTED) return -KCPMUX_ERR_STATE;
         if (size < 8) return -KCPMUX_ERR_INVALID_FORMAT;
 
         uint32_t stream_id = __read_u32(buf + 4);
@@ -442,10 +442,14 @@ int kcpmux_protocol_send_stream_payload(
     unsigned msg_len = 8 + size;
     if (msg_len > KCPMUX_PROTO_MSG_MAX_LEN) return -KCPMUX_ERR_INVALID_PARAM;
 
-    uint8_t buf[KCPMUX_PROTO_MSG_MAX_LEN];
-    __write_common(buf, KCPMUX_MSG_STREAM_PAYLOAD, conn);
-    __write_u32(buf + 4, stream->stream_id);
-    memcpy(buf + 8, kcp_data, size);
+    uint8_t header[8];
+    kcpmux_iovec_t iov[2];
+    __write_common(header, KCPMUX_MSG_STREAM_PAYLOAD, conn);
+    __write_u32(header + 4, stream->stream_id);
+    iov[0].data = header;
+    iov[0].len = sizeof(header);
+    iov[1].data = kcp_data;
+    iov[1].len = size;
 
-    return kcpmux_conn_write_socket(conn, buf, msg_len);
+    return kcpmux_conn_write_socketv(conn, iov, 2);
 }

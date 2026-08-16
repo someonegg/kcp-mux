@@ -101,6 +101,10 @@ int kcpmux_conn_send_close_ack(kcpmux_conn_t *conn, uint8_t reason);
 // Send conn data to socket
 // Return: 0 on success, < 0 on error
 int kcpmux_conn_write_socket(kcpmux_conn_t *conn, const uint8_t *buf, unsigned size);
+int kcpmux_conn_write_socketv(
+    kcpmux_conn_t *conn,
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt);
 
 // Stream management
 void kcpmux_conn_add_stream(kcpmux_conn_t *conn, kcpmux_stream_t *stream);

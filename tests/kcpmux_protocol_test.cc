@@ -42,6 +42,8 @@ TEST(kcpmux_protocol, conn_connect_message_format) {
 
     // Verify message was sent
     ASSERT_EQ(ctx.sent_packets.size(), 1u);
+    ASSERT_EQ(ctx.sent_iov_counts.size(), 1u);
+    EXPECT_EQ(ctx.sent_iov_counts[0], 1u);
     auto &pkt = ctx.sent_packets[0];
 
     // Verify format: common(4) + version(1) + ext_len(2) + ext(N)
@@ -88,7 +90,7 @@ TEST(kcpmux_protocol, rejected_passive_conn_discards_installed_callbacks) {
     RejectingConnectContext ctx;
     kcpmux_engine_callbacks_t callbacks{};
     callbacks.set_timer = test_set_timer;
-    callbacks.write_socket = test_write_socket;
+    callbacks.write_socketv = test_write_socketv;
     callbacks.monotonic_time_ms = test_monotonic_time_ms;
     callbacks.conn_connect_notify = reject_conn_after_installing_callbacks;
     kcpmux_engine_t
@@ -499,11 +501,19 @@ TEST(kcpmux_protocol, stream_payload_message_format) {
 
     // Send data
     ctx.sent_packets.clear();
+    ctx.sent_iov_counts.clear();
+    ctx.sent_iov_fragments.clear();
     uint8_t data[] = {0x01, 0x02, 0x03, 0x04};
     kcpmux_stream_send(stream, data, sizeof(data), 1);
 
     // Verify STREAM_PAYLOAD was sent
     ASSERT_GE(ctx.sent_packets.size(), 1u);
+    ASSERT_GE(ctx.sent_iov_counts.size(), 1u);
+    EXPECT_EQ(ctx.sent_iov_counts[0], 2u);
+    ASSERT_EQ(ctx.sent_iov_fragments.size(), 1u);
+    ASSERT_EQ(ctx.sent_iov_fragments[0].size(), 2u);
+    EXPECT_EQ(ctx.sent_iov_fragments[0][0].size(), 8u);
+    EXPECT_GT(ctx.sent_iov_fragments[0][1].size(), KCPMUX_IKCP_OVERHEAD);
     auto &pkt = ctx.sent_packets[0];
 
     // Verify format: common(4) + stream_id(4) + kcp_data(N)
@@ -652,7 +662,7 @@ TEST(kcpmux_protocol, invalid_first_payload_rolls_back_passive_stream) {
     auto payload_msg = build_stream_payload(1, fake_kcp, sizeof(fake_kcp));
 
     ret = kcpmux_engine_input(engine, payload_msg.data(), payload_msg.size(), addr.get());
-    EXPECT_LE(ret, KCPMUX_ERR_KCPRET(0)); // invalid kcp format
+    EXPECT_LE(ret, -KCPMUX_ERR_KCPRET(0)); // invalid kcp format
 
     EXPECT_EQ(ctx.stream_notify_count, 1);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);

@@ -108,7 +108,7 @@ int kcpmux_stream_config_prepare(
 
 static int kcpmux_engine_callbacks_valid(const kcpmux_engine_callbacks_t *callbacks)
 {
-    return callbacks && callbacks->set_timer && callbacks->write_socket &&
+    return callbacks && callbacks->set_timer && callbacks->write_socketv &&
         callbacks->monotonic_time_ms;
 }
 
@@ -177,7 +177,7 @@ kcpmux_engine_t *kcpmux_engine_create(
     engine->default_stream_config = stream_config;
 
     // KCP
-    engine->kcp_ops = (kcpmux_kcp_ops_t *)selected_kcp_ops;
+    engine->kcp_ops = *selected_kcp_ops;
 
     // Callbacks
     engine->callbacks = *callbacks;
@@ -460,15 +460,24 @@ void kcpmux_engine_rearm_timer(kcpmux_engine_t *engine, int64_t now_ms)
     engine->callbacks.set_timer(delay_ms, engine->user_data);
 }
 
-int kcpmux_engine_write_socket(
+int kcpmux_engine_write_socketv(
     kcpmux_engine_t *engine,
-    const uint8_t *buf,
-    unsigned size,
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
     const kcpmux_addr_t *addr)
 {
-    if (!engine || !engine->callbacks.write_socket) return -KCPMUX_ERR_INVALID_PARAM;
+    uint64_t size = 0;
+    unsigned i;
 
-    int ret = engine->callbacks.write_socket(buf, size, addr, engine->user_data);
+    if (!engine || !engine->callbacks.write_socketv || !iov || iovcnt == 0) {
+        return -KCPMUX_ERR_INVALID_PARAM;
+    }
+    for (i = 0; i < iovcnt; i++) {
+        if (iov[i].len > 0 && !iov[i].data) return -KCPMUX_ERR_INVALID_PARAM;
+        size += iov[i].len;
+    }
+
+    int ret = engine->callbacks.write_socketv(iov, iovcnt, addr, engine->user_data);
 
     // Update tx statistics
     if (ret) {

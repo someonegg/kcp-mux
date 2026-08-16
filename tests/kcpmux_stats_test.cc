@@ -57,6 +57,7 @@ TEST_F(kcpmux_stats_engine, initial_zero) {
     EXPECT_EQ(stats.api_stream_create_calls, 0u);
     EXPECT_EQ(stats.api_stream_close_calls, 0u);
     EXPECT_EQ(stats.api_stream_send_calls, 0u);
+    EXPECT_EQ(stats.api_stream_sendv_calls, 0u);
     EXPECT_EQ(stats.api_stream_recv_calls, 0u);
 
     kcpmux_engine_destroy(engine);
@@ -360,6 +361,7 @@ TEST_F(kcpmux_stats_engine, api_calls) {
     EXPECT_EQ(stats.api_stream_create_calls, 0u);
     EXPECT_EQ(stats.api_stream_close_calls, 0u);
     EXPECT_EQ(stats.api_stream_send_calls, 0u);
+    EXPECT_EQ(stats.api_stream_sendv_calls, 0u);
     EXPECT_EQ(stats.api_stream_recv_calls, 0u);
 
     // Test api_conn_connect_calls
@@ -429,6 +431,15 @@ TEST_F(kcpmux_stats_engine, api_calls) {
     kcpmux_engine_get_stats(ctx.client_engine, &stats);
     EXPECT_EQ(stats.api_stream_send_calls, 3u);
 
+    kcpmux_iovec_t iov[] = {
+        {reinterpret_cast<const uint8_t *>(data.data()),
+         static_cast<unsigned>(data.size())},
+    };
+    ret = kcpmux_stream_sendv(client_stream, iov, 1, 1);
+    EXPECT_GT(ret, 0);
+    kcpmux_engine_get_stats(ctx.client_engine, &stats);
+    EXPECT_EQ(stats.api_stream_sendv_calls, 1u);
+
     pump_kcp(ctx);
 
     // Test api_stream_recv_calls on server
@@ -469,6 +480,7 @@ TEST_F(kcpmux_stats_engine, api_calls) {
     EXPECT_EQ(stats.api_stream_create_calls, 1u);
     EXPECT_EQ(stats.api_stream_close_calls, 1u);
     EXPECT_EQ(stats.api_stream_send_calls, 3u);
+    EXPECT_EQ(stats.api_stream_sendv_calls, 1u);
     EXPECT_EQ(stats.api_stream_recv_calls, 0u);  // recv was on server
 
     kcpmux_engine_get_stats(ctx.server_engine, &stats);

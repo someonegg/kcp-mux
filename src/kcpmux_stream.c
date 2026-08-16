@@ -4,6 +4,7 @@
 #include "kcpmux_stream.h"
 #include "kcpmux_protocol.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -135,7 +136,7 @@ kcpmux_stream_t *kcpmux_stream_new(
     }
 
     // Create KCP instance
-    kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+    kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
 
     stream->kcp = ops->create(stream->stream_id, stream, stream->conn->engine->user_data);
     if (!stream->kcp) {
@@ -190,7 +191,7 @@ void kcpmux_stream_close_internal(kcpmux_stream_t *stream, uint8_t reason)
     // context. Release it before close notifications, which may release the
     // corresponding external wrapper.
     if (stream->kcp) {
-        engine->kcp_ops->release(stream->kcp);
+        engine->kcp_ops.release(stream->kcp);
         stream->kcp = NULL;
     }
 
@@ -339,32 +340,142 @@ void kcpmux_stream_set_callbacks(
     stream->user_data = user_data;
 }
 
-int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int flush)
-{
-    if (!stream || !buf || size == 0) return -KCPMUX_ERR_INVALID_PARAM;
+typedef int (*kcpmux_stream_send_chunk_fn)(
+    kcpmux_stream_t *stream,
+    void *context,
+    unsigned size);
 
+typedef struct kcpmux_contiguous_send_context_s {
+    const uint8_t *buf;
+    unsigned offset;
+} kcpmux_contiguous_send_context_t;
+
+typedef struct kcpmux_vectored_send_context_s {
+    const kcpmux_iovec_t *iov;
+    unsigned iovcnt;
+    unsigned index;
+    unsigned offset;
+    uint8_t *scratch;
+} kcpmux_vectored_send_context_t;
+
+static void kcpmux_vectored_advance(
+    kcpmux_vectored_send_context_t *context,
+    unsigned size)
+{
+    while (size > 0) {
+        const kcpmux_iovec_t *item = &context->iov[context->index];
+        unsigned available = item->len - context->offset;
+        unsigned take = available < size ? available : size;
+        context->offset += take;
+        size -= take;
+        if (context->offset == item->len) {
+            context->index++;
+            context->offset = 0;
+        }
+    }
+    while (context->index < context->iovcnt &&
+           context->iov[context->index].len == 0) {
+        context->index++;
+    }
+}
+
+static void kcpmux_vectored_copy(
+    const kcpmux_vectored_send_context_t *source,
+    uint8_t *dest,
+    unsigned size)
+{
+    kcpmux_vectored_send_context_t cursor = *source;
+    while (size > 0) {
+        const kcpmux_iovec_t *item = &cursor.iov[cursor.index];
+        unsigned available = item->len - cursor.offset;
+        unsigned take = available < size ? available : size;
+        if (take > 0) {
+            memcpy(dest, item->data + cursor.offset, take);
+            dest += take;
+            size -= take;
+            cursor.offset += take;
+        }
+        if (cursor.offset == item->len) {
+            cursor.index++;
+            cursor.offset = 0;
+        }
+    }
+}
+
+static int kcpmux_stream_send_contiguous_chunk(
+    kcpmux_stream_t *stream,
+    void *opaque,
+    unsigned size)
+{
+    kcpmux_contiguous_send_context_t *context =
+        (kcpmux_contiguous_send_context_t *)opaque;
+    int ret = stream->conn->engine->kcp_ops.send(
+        stream->kcp,
+        (const char *)(context->buf + context->offset),
+        (int)size);
+    if (ret >= 0) context->offset += size;
+    return ret;
+}
+
+static int kcpmux_stream_send_vectored_chunk(
+    kcpmux_stream_t *stream,
+    void *opaque,
+    unsigned size)
+{
+    kcpmux_vectored_send_context_t *context =
+        (kcpmux_vectored_send_context_t *)opaque;
+    kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
+    int ret;
+
+    if (ops->sendv) {
+        ret = ops->sendv(
+            stream->kcp,
+            context->iov + context->index,
+            context->iovcnt - context->index,
+            context->offset,
+            (int)size);
+    } else {
+        kcpmux_vectored_copy(context, context->scratch, size);
+        ret = ops->send(stream->kcp, (const char *)context->scratch, (int)size);
+    }
+    if (ret >= 0) kcpmux_vectored_advance(context, size);
+    return ret;
+}
+
+static int kcpmux_stream_send_chunks(
+    kcpmux_stream_t *stream,
+    unsigned size,
+    int flush,
+    int vectored,
+    kcpmux_stream_send_chunk_fn send_chunk,
+    void *context)
+{
     kcpmux_engine_t *engine = stream->conn->engine;
     int64_t now = kcpmux_engine_now(engine);
     kcpmux_engine_operation_enter(engine);
 
-    // Update API call statistics
-    stream->conn->engine->stats.api_stream_send_calls++;
+    if (vectored) {
+        engine->stats.api_stream_sendv_calls++;
+    } else {
+        engine->stats.api_stream_send_calls++;
+    }
 
     if (stream->internal_closed) {
         kcpmux_engine_operation_leave(engine);
-        return KCPMUX_ERR_CLOSED;
+        return -KCPMUX_ERR_CLOSED;
     }
     if (stream->state != KCPMUX_STREAM_STATE_OPEN ||
         stream->conn->state != KCPMUX_CONN_STATE_CONNECTED) {
         kcpmux_engine_operation_leave(engine);
-        return KCPMUX_ERR_STATE;
+        return -KCPMUX_ERR_STATE;
     }
 
-    kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+    kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
 
-    // Check if send buffer is becoming full
-    int waitsnd = ops->waitsnd(stream->kcp);
-    if (waitsnd >= (int)stream->config.send_pause_threshold) {
+    // A flush-only call has no data to enqueue, so it must not be blocked by
+    // an already-full send buffer.
+    int waitsnd = size > 0 ? ops->waitsnd(stream->kcp) : 0;
+    if (size > 0 && waitsnd >= (int)stream->config.send_pause_threshold) {
         // Record write block start time if this is a new block
         if (!stream->write_blocked) {
             stream->write_block_start_ts = now;
@@ -379,30 +490,28 @@ int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned siz
 
     // Split data into chunks based on kcp_mss and send each chunk
     unsigned chunk_size = stream->config.kcp_mss;
-    unsigned offset = 0;
     unsigned remaining = size;
     unsigned total_sent = 0;
 
     while (remaining > 0) {
         unsigned send_size = (remaining < chunk_size) ? remaining : chunk_size;
-        int ret = ops->send(stream->kcp, (const char *)(buf + offset), (int)send_size);
+        int ret = send_chunk(stream, context, send_size);
         if (ret < 0) {
             if (total_sent == 0) {
                 kcpmux_engine_operation_leave(engine);
-                return KCPMUX_ERR_KCPRET(ret);
+                return -KCPMUX_ERR_KCPRET(ret);
             }
             break;
         }
 
         total_sent += send_size;
-        offset += send_size;
         remaining -= send_size;
     }
 
     // Update statistics
     stream->stats.up_sent_bytes += total_sent;
 
-    if (total_sent == 0) {
+    if (total_sent == 0 && !flush) {
         kcpmux_engine_operation_leave(engine);
         return 0;
     }
@@ -421,6 +530,55 @@ int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned siz
 
     kcpmux_engine_operation_leave(engine);
     return (int)total_sent;
+}
+
+int kcpmux_stream_send(kcpmux_stream_t *stream, const uint8_t *buf, unsigned size, int flush)
+{
+    kcpmux_contiguous_send_context_t context;
+    if (!stream || size > INT_MAX || (size > 0 && !buf) || (size == 0 && !flush)) {
+        return -KCPMUX_ERR_INVALID_PARAM;
+    }
+    context.buf = buf;
+    context.offset = 0;
+    return kcpmux_stream_send_chunks(
+        stream, size, flush, 0, kcpmux_stream_send_contiguous_chunk, &context);
+}
+
+int kcpmux_stream_sendv(
+    kcpmux_stream_t *stream,
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
+    int flush)
+{
+    kcpmux_vectored_send_context_t context;
+    uint64_t total = 0;
+    unsigned i;
+
+    if (!stream || (iovcnt > 0 && !iov)) return -KCPMUX_ERR_INVALID_PARAM;
+    for (i = 0; i < iovcnt; i++) {
+        if (iov[i].len > 0 && !iov[i].data) return -KCPMUX_ERR_INVALID_PARAM;
+        total += iov[i].len;
+        if (total > INT_MAX) return -KCPMUX_ERR_INVALID_PARAM;
+    }
+    if (total == 0 && !flush) return -KCPMUX_ERR_INVALID_PARAM;
+
+    uint8_t scratch[stream->config.kcp_mss];
+    context.iov = iov;
+    context.iovcnt = iovcnt;
+    context.index = 0;
+    context.offset = 0;
+    context.scratch = scratch;
+    while (context.index < iovcnt && iov[context.index].len == 0) {
+        context.index++;
+    }
+
+    return kcpmux_stream_send_chunks(
+        stream,
+        (unsigned)total,
+        flush,
+        1,
+        kcpmux_stream_send_vectored_chunk,
+        &context);
 }
 
 void kcpmux_stream_finish_batch(kcpmux_stream_t *stream)
@@ -456,15 +614,15 @@ int kcpmux_stream_peek_size(kcpmux_stream_t *stream)
 {
     if (!stream) return -KCPMUX_ERR_INVALID_PARAM;
     if (stream->internal_closed) {
-        return KCPMUX_ERR_CLOSED;
+        return -KCPMUX_ERR_CLOSED;
     }
     if (stream->state != KCPMUX_STREAM_STATE_OPEN &&
         !(stream->state == KCPMUX_STREAM_STATE_CLOSING &&
           stream->close_phase == KCPMUX_STREAM_CLOSE_REMOTE_DRAIN)) {
-        return KCPMUX_ERR_STATE;
+        return -KCPMUX_ERR_STATE;
     }
 
-    int ret = stream->conn->engine->kcp_ops->peeksize(stream->kcp);
+    int ret = stream->conn->engine->kcp_ops.peeksize(stream->kcp);
     return ret > 0 ? ret : 0;
 }
 
@@ -477,7 +635,7 @@ int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size)
 
     int peek_size = kcpmux_stream_peek_size(stream);
     if (peek_size < 0) return peek_size;
-    if ((unsigned)peek_size > size) return KCPMUX_ERR_BUFFER_TOO_SMALL;
+    if ((unsigned)peek_size > size) return -KCPMUX_ERR_BUFFER_TOO_SMALL;
     if (peek_size == 0) {
         // Record read block start time if this is a new block
         if (!stream->read_blocked) {
@@ -489,10 +647,10 @@ int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size)
     }
 
     // Receive data from KCP
-    kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+    kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
     int ret = ops->recv(stream->kcp, (char *)buf, peek_size);
     if (ret < 0) {
-        return KCPMUX_ERR_KCPRET(ret);
+        return -KCPMUX_ERR_KCPRET(ret);
     }
 
     // Update statistics
@@ -572,7 +730,7 @@ static void kcpmux_stream_advance_local_close(kcpmux_stream_t *stream, int64_t n
 {
     if (!stream || stream->internal_closed ||
         stream->close_phase != KCPMUX_STREAM_CLOSE_LOCAL_DRAIN ||
-        stream->conn->engine->kcp_ops->waitsnd(stream->kcp) != 0) {
+        stream->conn->engine->kcp_ops.waitsnd(stream->kcp) != 0) {
         return;
     }
 
@@ -592,7 +750,7 @@ void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now)
     switch (stream->state) {
     case KCPMUX_STREAM_STATE_OPEN:
         {
-            kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+            kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
 
             // Update KCP
             kcpmux_stream_clear_pending(stream);
@@ -626,7 +784,7 @@ void kcpmux_stream_update(kcpmux_stream_t *stream, int64_t now)
     case KCPMUX_STREAM_STATE_CLOSING:
         switch (stream->close_phase) {
         case KCPMUX_STREAM_CLOSE_LOCAL_DRAIN: {
-            kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+            kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
             kcpmux_stream_clear_pending(stream);
             ops->update(stream->kcp, now);
             if (ops->waitsnd(stream->kcp) == 0) {
@@ -703,14 +861,14 @@ void kcpmux_stream_refresh_timer(kcpmux_stream_t *stream, int64_t now)
     }
     switch (stream->state) {
     case KCPMUX_STREAM_STATE_OPEN:
-        deadline_ms = stream->conn->engine->kcp_ops->check(stream->kcp, now);
+        deadline_ms = stream->conn->engine->kcp_ops.check(stream->kcp, now);
         break;
 
     case KCPMUX_STREAM_STATE_CLOSING:
         switch (stream->close_phase) {
         case KCPMUX_STREAM_CLOSE_LOCAL_DRAIN:
             deadline_ms = kcpmux_stream_earlier_deadline(
-                stream->conn->engine->kcp_ops->check(stream->kcp, now),
+                stream->conn->engine->kcp_ops.check(stream->kcp, now),
                 kcpmux_timer_deadline_after(
                     stream->drain_started_ts, stream->config.drain_timeout_ms));
             break;
@@ -761,17 +919,17 @@ int kcpmux_stream_handle_payload(
     if (!stream || !buf || size == 0) return -KCPMUX_ERR_INVALID_PARAM;
 
     if (stream->internal_closed) {
-        return KCPMUX_ERR_CLOSED;
+        return -KCPMUX_ERR_CLOSED;
     }
     if (!kcpmux_stream_kcp_active(stream)) {
-        return KCPMUX_ERR_STATE;
+        return -KCPMUX_ERR_STATE;
     }
 
     // Update statistics
     stream->stats.rx_packets++;
     stream->stats.rx_bytes += size;
 
-    kcpmux_kcp_ops_t *ops = stream->conn->engine->kcp_ops;
+    kcpmux_kcp_ops_t *ops = &stream->conn->engine->kcp_ops;
 
     // Input to KCP
     ops->current_update(stream->kcp, recv_time_ms);
@@ -779,7 +937,7 @@ int kcpmux_stream_handle_payload(
     // input() may partially mutate a custom KCP implementation even on error.
     kcpmux_stream_accumulate_update(stream, recv_time_ms);
     if (ret < 0) {
-        return KCPMUX_ERR_KCPRET(ret);
+        return -KCPMUX_ERR_KCPRET(ret);
     }
 
     // Check flow control recovery (edge-triggered: blocked -> readable)
@@ -806,7 +964,7 @@ int kcpmux_stream_handle_payload(
 
 int kcpmux_stream_handle_close(kcpmux_stream_t *stream, uint8_t reason)
 {
-    if (!stream || stream->internal_closed) return KCPMUX_ERR_CLOSED;
+    if (!stream || stream->internal_closed) return -KCPMUX_ERR_CLOSED;
 
     if (reason != KCPMUX_CLOSE_REASON_NORMAL) {
         kcpmux_stream_send_close_ack(stream, reason);
@@ -833,17 +991,17 @@ int kcpmux_stream_handle_close(kcpmux_stream_t *stream, uint8_t reason)
             kcpmux_stream_send_close_ack(stream, reason);
             return 0;
         default:
-            return KCPMUX_ERR_STATE;
+            return -KCPMUX_ERR_STATE;
         }
     }
-    if (stream->state != KCPMUX_STREAM_STATE_OPEN) return KCPMUX_ERR_STATE;
+    if (stream->state != KCPMUX_STREAM_STATE_OPEN) return -KCPMUX_ERR_STATE;
 
     kcpmux_stream_send_close_ack(stream, reason);
     stream->close_reason = reason;
     stream->close_phase = KCPMUX_STREAM_CLOSE_REMOTE_DRAIN;
     stream->drain_started_ts = now;
     kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_CLOSING);
-    if (stream->conn->engine->kcp_ops->peeksize(stream->kcp) <= 0) {
+    if (stream->conn->engine->kcp_ops.peeksize(stream->kcp) <= 0) {
         kcpmux_stream_schedule_finalize(stream, reason, now);
     }
     return 0;
@@ -855,7 +1013,7 @@ int kcpmux_stream_handle_close(kcpmux_stream_t *stream, uint8_t reason)
 
 int kcpmux_stream_send_close(kcpmux_stream_t *stream, uint8_t reason)
 {
-    if (!stream || stream->internal_closed) return KCPMUX_ERR_CLOSED;
+    if (!stream || stream->internal_closed) return -KCPMUX_ERR_CLOSED;
     int64_t now = kcpmux_engine_now(stream->conn->engine);
     stream->last_ctrl_ts = now;
     int ret = kcpmux_protocol_send_stream_close(stream, reason);

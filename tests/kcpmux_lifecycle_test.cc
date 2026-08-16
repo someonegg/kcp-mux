@@ -92,15 +92,21 @@ TEST(kcpmux_lifecycle, engine_create_rejects_incomplete_dependencies) {
     TestContext ctx;
     kcpmux_engine_callbacks_t callbacks{};
     callbacks.set_timer = test_set_timer;
-    callbacks.write_socket = test_write_socket;
+    callbacks.write_socketv = test_write_socketv;
     callbacks.monotonic_time_ms = test_monotonic_time_ms;
 
     kcpmux_engine_callbacks_t incomplete_callbacks = callbacks;
+    incomplete_callbacks.write_socketv = nullptr;
+    EXPECT_EQ(kcpmux_engine_create(
+        nullptr, nullptr, nullptr, &incomplete_callbacks, &ctx, nullptr), nullptr);
+
+    incomplete_callbacks = callbacks;
     incomplete_callbacks.monotonic_time_ms = nullptr;
     EXPECT_EQ(kcpmux_engine_create(
         nullptr, nullptr, nullptr, &incomplete_callbacks, &ctx, nullptr), nullptr);
 
     kcpmux_kcp_ops_t incomplete_ops = *kcpmux_default_kcp_ops();
+    EXPECT_NE(incomplete_ops.sendv, nullptr);
     incomplete_ops.current_update = nullptr;
     EXPECT_EQ(kcpmux_engine_create(
         nullptr, nullptr, nullptr, &callbacks, &ctx, &incomplete_ops), nullptr);
@@ -266,7 +272,7 @@ TEST(kcpmux_lifecycle, engine_prepares_and_validates_default_configs) {
     TestContext ctx;
     kcpmux_engine_callbacks_t callbacks{};
     callbacks.set_timer = test_set_timer;
-    callbacks.write_socket = test_write_socket;
+    callbacks.write_socketv = test_write_socketv;
     callbacks.monotonic_time_ms = test_monotonic_time_ms;
 
     kcpmux_conn_config_t conn_config;

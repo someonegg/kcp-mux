@@ -11,6 +11,13 @@ typedef struct kcpmux_engine_s kcpmux_engine_t;
 typedef struct kcpmux_conn_s kcpmux_conn_t;
 typedef struct kcpmux_stream_s kcpmux_stream_t;
 
+// Read-only memory fragment used by vectored send and transport APIs. The
+// pointed-to bytes only need to remain valid for the duration of the call.
+typedef struct kcpmux_iovec_s {
+    const uint8_t *data;
+    unsigned       len;
+} kcpmux_iovec_t;
+
 // ============================================================================
 // Protocol constants
 // ============================================================================
@@ -41,11 +48,11 @@ typedef struct kcpmux_addr_s {
 #define KCPMUX_ERR_INVALID_FORMAT            41
 #define KCPMUX_ERR_INVALID_PARAM             42
 
-// kcpmux-specific negative API errors.
-#define KCPMUX_ERR_STATE                     -200    // mismatch state
-#define KCPMUX_ERR_CLOSED                    -201    // already closed
-#define KCPMUX_ERR_BUFFER_TOO_SMALL          -202    // receive buffer cannot hold next message
-#define KCPMUX_ERR_KCPRET(kcp_ret)          (-300 + (kcp_ret))
+// kcpmux-specific status codes.
+#define KCPMUX_ERR_STATE                      200    // mismatch state
+#define KCPMUX_ERR_CLOSED                     201    // already closed
+#define KCPMUX_ERR_BUFFER_TOO_SMALL           202    // receive buffer cannot hold next message
+#define KCPMUX_ERR_KCPRET(kcp_ret)           (300 - (kcp_ret))
 
 // ACK Result codes (connection handshake)
 #define KCPMUX_ACK_RESULT_OK                 0x00    // Success
@@ -165,7 +172,7 @@ typedef struct kcpmux_engine_stats_s {
     uint64_t rx_bytes;               // Bytes received from lower layer
 
     // Error statistics
-    uint64_t tx_error_packets;       // Packets failed to send (write_socket failed)
+    uint64_t tx_error_packets;       // Packets failed to send (write_socketv failed)
 
     // Connection statistics
     uint64_t conn_count;             // Current connection count
@@ -191,6 +198,7 @@ typedef struct kcpmux_engine_stats_s {
     uint64_t api_stream_create_calls;  // kcpmux_stream_create call count
     uint64_t api_stream_close_calls;   // kcpmux_stream_close call count
     uint64_t api_stream_send_calls;    // kcpmux_stream_send call count
+    uint64_t api_stream_sendv_calls;   // kcpmux_stream_sendv call count
     uint64_t api_stream_recv_calls;    // kcpmux_stream_recv call count
 } kcpmux_engine_stats_t;
 
@@ -236,11 +244,13 @@ typedef struct kcpmux_engine_callbacks_s {
     // the host timer before destroying the engine, and never update afterward.
     void (*set_timer)(uint64_t wake_after_ms, void *user_data);
 
-    // Sends without synchronously feeding work back into kcpmux.
-    // Returns 1 on success or 0 on error.
-    int (*write_socket)(
-        const uint8_t *buf,
-        unsigned size,
+    // Consumes every fragment synchronously without feeding work back into
+    // kcpmux. The pointers become invalid when this callback returns. A host
+    // that queues asynchronous transport work must copy into host-owned
+    // storage before returning. Returns 1 on success or 0 on error.
+    int (*write_socketv)(
+        const kcpmux_iovec_t *iov,
+        unsigned iovcnt,
         const kcpmux_addr_t *addr,
         void *user_data);
 

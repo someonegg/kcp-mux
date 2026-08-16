@@ -33,10 +33,19 @@ void e2e_set_timer(uint64_t wake_after_ms, void *user_data)
     }
 }
 
-int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data)
+int e2e_write_socketv(
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
+    const kcpmux_addr_t *addr,
+    void *user_data)
 {
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
+    std::vector<uint8_t> packet;
     if (ep->udp_socket < 0) return 0;
+
+    for (unsigned i = 0; i < iovcnt; i++) {
+        packet.insert(packet.end(), iov[i].data, iov[i].data + iov[i].len);
+    }
 
     struct sockaddr_in dest{};
     dest.sin_family = AF_INET;
@@ -53,12 +62,12 @@ int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *add
 
     ssize_t sent = sendto(
         ep->udp_socket,
-        (const char *)buf,
-        size,
+        (const char *)packet.data(),
+        packet.size(),
         0,
         (struct sockaddr *)&dest,
         sizeof(dest));
-    if (sent == size) {
+    if (sent == (ssize_t)packet.size()) {
         ep->total_bytes_sent += sent;
         return 1;
     }
@@ -243,7 +252,7 @@ bool E2EEndpoint::init(uint16_t bind_port)
     // Create engine
     kcpmux_engine_callbacks_t engine_callbacks{};
     engine_callbacks.set_timer = e2e_set_timer;
-    engine_callbacks.write_socket = e2e_write_socket;
+    engine_callbacks.write_socketv = e2e_write_socketv;
     engine_callbacks.monotonic_time_ms = e2e_monotonic_time_ms;
     engine_callbacks.conn_connect_notify = e2e_conn_connect_notify;
 

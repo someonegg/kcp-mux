@@ -205,7 +205,11 @@ struct E2EContext {
 // ============================================================================
 
 void e2e_set_timer(uint64_t wake_after_ms, void *user_data);
-int e2e_write_socket(const uint8_t *buf, unsigned size, const kcpmux_addr_t *addr, void *user_data);
+int e2e_write_socketv(
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
+    const kcpmux_addr_t *addr,
+    void *user_data);
 int64_t e2e_monotonic_time_ms(void *user_data);
 int e2e_conn_connect_notify(
     kcpmux_conn_t *conn,

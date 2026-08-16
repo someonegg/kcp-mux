@@ -87,6 +87,8 @@ struct TestContext {
     } timer_probe;
 
     std::vector<std::vector<uint8_t>> sent_packets;
+    std::vector<unsigned> sent_iov_counts;
+    std::vector<std::vector<std::vector<uint8_t>>> sent_iov_fragments;
     int64_t current_time_ms = 0;
     uint64_t timer_ms = 0;
 
@@ -118,6 +120,8 @@ struct TestContext {
     void reset()
     {
         sent_packets.clear();
+        sent_iov_counts.clear();
+        sent_iov_fragments.clear();
         current_time_ms = 0;
         timer_ms = 0;
         timer_probe.reset();
@@ -149,15 +153,23 @@ static void test_set_timer(uint64_t wake_after_ms, void *user_data)
     ctx->timer_probe.replace(ctx->current_time_ms, wake_after_ms);
 }
 
-static int test_write_socket(
-    const uint8_t *buf,
-    unsigned size,
+static int test_write_socketv(
+    const kcpmux_iovec_t *iov,
+    unsigned iovcnt,
     const kcpmux_addr_t *addr,
     void *user_data)
 {
+    std::vector<uint8_t> packet;
+    std::vector<std::vector<uint8_t>> fragments;
     (void)addr;  // Unused
     TestContext *ctx = (TestContext *)user_data;
-    ctx->sent_packets.emplace_back(buf, buf + size);
+    ctx->sent_iov_counts.push_back(iovcnt);
+    for (unsigned i = 0; i < iovcnt; i++) {
+        fragments.emplace_back(iov[i].data, iov[i].data + iov[i].len);
+        packet.insert(packet.end(), iov[i].data, iov[i].data + iov[i].len);
+    }
+    ctx->sent_iov_fragments.push_back(std::move(fragments));
+    ctx->sent_packets.push_back(std::move(packet));
     return 1;
 }
 
@@ -249,7 +261,7 @@ static inline kcpmux_engine_t *create_test_engine(TestContext *ctx)
 {
     kcpmux_engine_callbacks_t callbacks{};
     callbacks.set_timer = test_set_timer;
-    callbacks.write_socket = test_write_socket;
+    callbacks.write_socketv = test_write_socketv;
     callbacks.monotonic_time_ms = test_monotonic_time_ms;
     callbacks.conn_connect_notify = test_conn_connect_notify;
 

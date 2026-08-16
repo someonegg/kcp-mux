@@ -207,13 +207,22 @@ This means the peer does not know about a locally created stream until that stre
 
 Send path:
 
-1. The upper layer calls `kcpmux_stream_send`.
-2. Data is split by `kcp_mss` and passed into KCP.
-3. The KCP output callback adds the 8-byte KCPMUX header to each KCP segment: `type(1) + generation_id(3) + stream_id(4)`.
-4. The packet is sent to the lower layer through the `write_socket` callback.
+1. The upper layer calls `kcpmux_stream_send` or supplies discontiguous memory
+   to `kcpmux_stream_sendv`.
+2. Data is flattened across iovec boundaries, split by `kcp_mss`, and copied
+   into KCP-owned send segments. The bundled KCP implementation performs this
+   gather-copy directly. A custom KCP implementation without `sendv` uses an
+   MSS-sized contiguous fallback inside kcp-mux.
+3. KCP emits a contiguous datagram. The KCP output callback supplies the
+   8-byte KCPMUX header and that datagram as two separate fragments:
+   `type(1) + generation_id(3) + stream_id(4)`, then `kcp_data`.
+4. The fragments are synchronously consumed by the required `write_socketv`
+   callback. A transport may use scatter/gather I/O or copy them directly into
+   its final owned send buffer.
 
-If the input exceeds `kcp_mss`, one `send` creates multiple KCP messages, so it
-does not correspond to one `recv`.
+If the flattened input exceeds `kcp_mss`, one `send` or `sendv` creates multiple
+KCP messages, so it does not correspond to one `recv`. Iovec boundaries do not
+create message boundaries.
 
 KCP update batching is controlled per stream by `batch_threshold`. Values `0`
 and `1` preserve immediate scheduling. Values greater than `1` count successful
