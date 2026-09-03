@@ -1,6 +1,7 @@
 #include "kcpmux_e2e_utils.h"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 
 namespace kcpmux_e2e {
@@ -93,15 +94,16 @@ int e2e_conn_connect_notify(
     std::lock_guard<std::mutex> lock(ep->mutex);
 
     // Store received extension data
-    if (proto_ext && proto_ext->data && proto_ext->len > 0) {
+    if (proto_ext && proto_ext->len > 0) {
         ep->conn_proto_ext_received.assign(proto_ext->data, proto_ext->data + proto_ext->len);
     }
 
-    // Fill response extension if configured
-    if (resp_proto_ext && !ep->conn_proto_ext_response.empty()) {
-        resp_proto_ext->data = ep->conn_proto_ext_response.data();
-        resp_proto_ext->len = (unsigned)ep->conn_proto_ext_response.size();
+    // Fill the embedded response buffer if configured.
+    const unsigned response_size = (unsigned)ep->conn_proto_ext_response.size();
+    if (response_size <= KCPMUX_PROTO_EXT_MAX_LEN && response_size > 0) {
+        std::memcpy(resp_proto_ext->data, ep->conn_proto_ext_response.data(), response_size);
     }
+    resp_proto_ext->len = response_size;
 
     ep->accepted_conns.push_back(conn);
     if (!ep->conn) {
@@ -143,6 +145,7 @@ void e2e_conn_state_changed(
 void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
 {
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
+    ep->conn_state.store(kcpmux_conn_get_state(conn));
     ep->conn_close_reason.store(reason);
     std::lock_guard<std::mutex> lock(ep->mutex);
     if (ep->conn == conn) {
@@ -529,8 +532,12 @@ void E2EEndpoint::connect_to_with_ext(
         kcpmux_proto_ext_t *proto_ext_ptr = nullptr;
         kcpmux_proto_ext_t proto_ext{};
         if (!conn_proto_ext_to_send.empty()) {
-            proto_ext.data = conn_proto_ext_to_send.data();
-            proto_ext.len = (unsigned)conn_proto_ext_to_send.size();
+            const size_t ext_size = std::min(
+                conn_proto_ext_to_send.size(),
+                static_cast<size_t>(KCPMUX_PROTO_EXT_MAX_LEN));
+            std::memcpy(proto_ext.data, conn_proto_ext_to_send.data(),
+                        ext_size);
+            proto_ext.len = (unsigned)ext_size;
             proto_ext_ptr = &proto_ext;
         }
 

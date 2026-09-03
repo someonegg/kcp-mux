@@ -619,6 +619,8 @@ TEST_F(kcpmux_stream_timer, peer_normal_close_drains_reads_then_finishes_async) 
     set_stream_callbacks(stream, &context);
     context.peek_result = 4;
     context.recv_result = 4;
+    stream->read_blocked = 0;
+    uint64_t read_block_count = stream->stats.read_block_count;
     auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
 
     ASSERT_EQ(kcpmux_engine_input(
@@ -631,6 +633,8 @@ TEST_F(kcpmux_stream_timer, peer_normal_close_drains_reads_then_finishes_async) 
 
     uint8_t buf[4];
     EXPECT_EQ(kcpmux_stream_recv(stream, buf, sizeof(buf)), 4);
+    EXPECT_EQ(stream->read_blocked, 0);
+    EXPECT_EQ(stream->stats.read_block_count, read_block_count);
     EXPECT_EQ(context.stream_close_calls, 0);
     ASSERT_NE(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
 
@@ -844,13 +848,18 @@ TEST_F(kcpmux_stream_timer, local_stream_ids_start_random_nonzero_and_advance) {
 TEST_F(kcpmux_stream_timer, terminal_stream_is_released_once) {
     kcpmux_stream_t *stream = NewStream(1);
     ASSERT_NE(stream, nullptr);
+    set_stream_callbacks(stream, &context);
 
     kcpmux_engine_operation_enter(engine);
-    kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_NORMAL);
+    kcpmux_stream_set_state(stream, KCPMUX_STREAM_STATE_ERROR);
+    kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_ERROR);
     ASSERT_FALSE(list_empty(&engine->pending_release_list));
     kcpmux_engine_operation_leave(engine);
 
     EXPECT_EQ(context.release_calls, 1);
+    EXPECT_EQ(context.stream_state_calls, 0);
+    EXPECT_EQ(context.stream_close_calls, 1);
+    EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_ERROR);
     EXPECT_EQ(conn->stream_count, 0u);
     EXPECT_EQ(engine->timer_node_count, 1u);
     EXPECT_TRUE(list_empty(&engine->pending_release_list));
@@ -964,7 +973,8 @@ TEST_F(kcpmux_stream_timer, recv_preserves_readable_state_for_small_buffer_and_e
     EXPECT_EQ(kcpmux_stream_recv(stream, buffer, sizeof(buffer)), 8);
     EXPECT_EQ(buffer[0], 0x5a);
     EXPECT_EQ(stream->stats.up_recv_bytes, 8u);
-    EXPECT_EQ(stream->read_blocked, 0);
+    EXPECT_EQ(stream->read_blocked, 1);
+    EXPECT_EQ(stream->stats.read_block_count, block_count + 1);
 
     context.peek_result = -1;
     EXPECT_EQ(kcpmux_stream_recv(stream, buffer, sizeof(buffer)), 0);

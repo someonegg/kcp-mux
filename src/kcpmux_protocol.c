@@ -72,7 +72,6 @@ int kcpmux_protocol_input(
         uint32_t generation_id;
         uint8_t version;
         uint16_t ext_len;
-        kcpmux_proto_ext_t resp_ext = {0};
         int result = KCPMUX_ACK_RESULT_ERROR;
 
         if (size < 7) return -KCPMUX_ERR_INVALID_FORMAT;
@@ -104,8 +103,7 @@ int kcpmux_protocol_input(
         new_conn->generation_id = generation_id;
 
         if (ext_len > 0) {
-            memcpy(new_conn->peer_proto_ext_buf, buf + 7, ext_len);
-            new_conn->peer_proto_ext.data = new_conn->peer_proto_ext_buf;
+            memcpy(new_conn->peer_proto_ext.data, buf + 7, ext_len);
             new_conn->peer_proto_ext.len = ext_len;
         }
         kcpmux_conn_note_receive(new_conn, recv_time_ms, 0);
@@ -116,21 +114,23 @@ int kcpmux_protocol_input(
         }
         kcpmux_engine_add_conn(engine, new_conn);
 
+        new_conn->self_proto_ext.len = 0;
         if (engine->callbacks.conn_connect_notify) {
             result = engine->callbacks.conn_connect_notify(
                 new_conn,
                 &new_conn->peer_proto_ext,
-                &resp_ext,
+                &new_conn->self_proto_ext,
                 engine->user_data);
         }
         if (result == KCPMUX_ACK_RESULT_OK) {
-            if (resp_ext.data && resp_ext.len > 0) {
-                unsigned len = resp_ext.len;
-                if (len > KCPMUX_PROTO_EXT_MAX_LEN) len = KCPMUX_PROTO_EXT_MAX_LEN;
-                memcpy(new_conn->self_proto_ext_buf, resp_ext.data, len);
-                new_conn->self_proto_ext.data = new_conn->self_proto_ext_buf;
-                new_conn->self_proto_ext.len = len;
+            if (new_conn->self_proto_ext.len > KCPMUX_PROTO_EXT_MAX_LEN) {
+                result = KCPMUX_ACK_RESULT_ERROR;
             }
+        }
+        if (result != KCPMUX_ACK_RESULT_OK) {
+            new_conn->self_proto_ext.len = 0;
+        }
+        if (result == KCPMUX_ACK_RESULT_OK) {
             kcpmux_conn_set_state(new_conn, KCPMUX_CONN_STATE_CONNECTED);
             kcpmux_conn_send_connect_ack(new_conn, KCPMUX_ACK_RESULT_OK);
         } else {
@@ -167,8 +167,7 @@ int kcpmux_protocol_input(
 
         if (version == KCPMUX_VERSION && result == KCPMUX_ACK_RESULT_OK) {
             if (ext_len > 0) {
-                memcpy(conn->peer_proto_ext_buf, buf + 8, ext_len);
-                conn->peer_proto_ext.data = conn->peer_proto_ext_buf;
+                memcpy(conn->peer_proto_ext.data, buf + 8, ext_len);
                 conn->peer_proto_ext.len = ext_len;
             }
             kcpmux_conn_set_state(conn, KCPMUX_CONN_STATE_CONNECTED);
@@ -336,7 +335,7 @@ int kcpmux_protocol_send_conn_connect(kcpmux_conn_t *conn)
     buf[4] = KCPMUX_VERSION;
     __write_u16(buf + 5, (uint16_t)conn->self_proto_ext.len);
     if (conn->self_proto_ext.len > 0) {
-        memcpy(buf + 7, conn->self_proto_ext_buf, conn->self_proto_ext.len);
+        memcpy(buf + 7, conn->self_proto_ext.data, conn->self_proto_ext.len);
     }
 
     return kcpmux_conn_write_socket(conn, buf, msg_len);
@@ -356,7 +355,7 @@ int kcpmux_protocol_send_conn_connect_ack(kcpmux_conn_t *conn, uint8_t result)
     buf[5] = result;
     __write_u16(buf + 6, (uint16_t)conn->self_proto_ext.len);
     if (conn->self_proto_ext.len > 0) {
-        memcpy(buf + 8, conn->self_proto_ext_buf, conn->self_proto_ext.len);
+        memcpy(buf + 8, conn->self_proto_ext.data, conn->self_proto_ext.len);
     }
 
     return kcpmux_conn_write_socket(conn, buf, msg_len);

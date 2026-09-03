@@ -9,6 +9,15 @@
 #include <string.h>
 
 static void kcpmux_stream_timer_callback(kcpmux_timer_node_t *node, int64_t now_ms);
+
+static void kcpmux_stream_mark_read_blocked(kcpmux_stream_t *stream, int64_t now)
+{
+    if (!stream || stream->read_blocked) return;
+
+    stream->read_block_start_ts = now;
+    stream->read_blocked = 1;
+    stream->stats.read_block_count++;
+}
 static void kcpmux_stream_advance_local_close(kcpmux_stream_t *stream, int64_t now);
 static void kcpmux_stream_clear_pending(kcpmux_stream_t *stream);
 
@@ -157,9 +166,8 @@ kcpmux_stream_t *kcpmux_stream_new(
         return NULL;
     }
 
-    stream->read_block_start_ts = kcpmux_engine_now(stream->conn->engine);
-    stream->read_blocked = 1;
-    stream->stats.read_block_count = 1; // TTFB
+    kcpmux_stream_mark_read_blocked(
+        stream, kcpmux_engine_now(stream->conn->engine)); // TTFB
     stream->conn->engine->stats.stream_opened_total++;
     stream->conn->engine->stats.stream_created_total++;
 
@@ -637,12 +645,8 @@ int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size)
     if (peek_size < 0) return peek_size;
     if ((unsigned)peek_size > size) return -KCPMUX_ERR_BUFFER_TOO_SMALL;
     if (peek_size == 0) {
-        // Record read block start time if this is a new block
-        if (!stream->read_blocked) {
-            stream->read_block_start_ts = kcpmux_engine_now(stream->conn->engine);
-            stream->read_blocked = 1;
-            stream->stats.read_block_count++;
-        }
+        kcpmux_stream_mark_read_blocked(
+            stream, kcpmux_engine_now(stream->conn->engine));
         return 0;
     }
 
@@ -656,12 +660,14 @@ int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size)
     // Update statistics
     stream->stats.up_recv_bytes += ret;
 
-    if (stream->state == KCPMUX_STREAM_STATE_CLOSING &&
-        stream->close_phase == KCPMUX_STREAM_CLOSE_REMOTE_DRAIN &&
-        ops->peeksize(stream->kcp) <= 0) {
-        kcpmux_stream_schedule_finalize(
-            stream, stream->close_reason,
-            kcpmux_engine_now(stream->conn->engine));
+    if (ops->peeksize(stream->kcp) <= 0) {
+        int64_t now = kcpmux_engine_now(stream->conn->engine);
+        if (stream->state == KCPMUX_STREAM_STATE_CLOSING &&
+            stream->close_phase == KCPMUX_STREAM_CLOSE_REMOTE_DRAIN) {
+            kcpmux_stream_schedule_finalize(stream, stream->close_reason, now);
+        } else if (stream->state == KCPMUX_STREAM_STATE_OPEN) {
+            kcpmux_stream_mark_read_blocked(stream, now);
+        }
     }
 
     return ret;
@@ -721,7 +727,9 @@ void kcpmux_stream_set_state(kcpmux_stream_t *stream, uint8_t new_state)
 
     kcpmux_stream_refresh_timer(stream, kcpmux_engine_now(stream->conn->engine));
 
-    if (stream->callbacks.stream_state_changed) {
+    if (new_state != KCPMUX_STREAM_STATE_CLOSED &&
+        new_state != KCPMUX_STREAM_STATE_ERROR &&
+        stream->callbacks.stream_state_changed) {
         stream->callbacks.stream_state_changed(stream, old_state, new_state, stream->user_data);
     }
 }

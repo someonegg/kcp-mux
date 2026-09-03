@@ -109,8 +109,8 @@ TEST_F(kcpmux_e2e_basic, close_client_initiated) {
     // Client closes connection
     ctx.client.close_conn();
 
-    // Wait for client to enter CLOSING state
-    ASSERT_TRUE(ctx.wait_conn_state(ctx.client, KCPMUX_CONN_STATE_CLOSING, 3000));
+    // The event loop may pass through CLOSING before this thread observes it.
+    ASSERT_TRUE(ctx.wait_conn_state(ctx.client, KCPMUX_CONN_STATE_CLOSED, 3000));
 }
 
 TEST_F(kcpmux_e2e_basic, close_server_initiated) {
@@ -122,8 +122,8 @@ TEST_F(kcpmux_e2e_basic, close_server_initiated) {
     // Server closes connection
     ctx.server.close_conn();
 
-    // Wait for server to enter CLOSING state
-    ASSERT_TRUE(ctx.wait_conn_state(ctx.server, KCPMUX_CONN_STATE_CLOSING, 3000));
+    // The event loop may pass through CLOSING before this thread observes it.
+    ASSERT_TRUE(ctx.wait_conn_state(ctx.server, KCPMUX_CONN_STATE_CLOSED, 3000));
 }
 
 // ============================================================================

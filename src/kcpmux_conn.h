@@ -23,10 +23,8 @@ struct kcpmux_conn_s {
     void                     *user_data;       // User data
 
     // Protocol extension data
-    uint8_t                   peer_proto_ext_buf[KCPMUX_PROTO_EXT_MAX_LEN];
-    kcpmux_proto_ext_t        peer_proto_ext;  // data points to peer_proto_ext_buf
-    uint8_t                   self_proto_ext_buf[KCPMUX_PROTO_EXT_MAX_LEN];
-    kcpmux_proto_ext_t        self_proto_ext;  // data points to self_proto_ext_buf
+    kcpmux_proto_ext_t        peer_proto_ext;
+    kcpmux_proto_ext_t        self_proto_ext;
 
     // Peer address
     kcpmux_addr_t             peer_addr;       // Peer address (points to peer_addr_buf)

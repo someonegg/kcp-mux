@@ -27,7 +27,7 @@ typedef struct kcpmux_kcp_ops_s {
     // Returns a nonnegative value on success or a negative value on error.
     int (*send)(void *kcp, const char *buf, int len);
 
-    // Returns 0 on success or -1 on error.
+    // Returns 0 on success or a negative value on error.
     int (*input)(void *kcp, const char *data, long size);
 
     // Consumes and returns received bytes, or <= 0 if unavailable or invalid.
@@ -64,7 +64,7 @@ typedef struct kcpmux_kcp_ops_s {
 
 #define KCPMUX_IKCP_OVERHEAD                  (24)
 
-// ikcp_nodelay(nodelay, interval, faskack, !flowctrl);
+// ikcp_nodelay(nodelay, interval, fastack, !flowctrl);
 #define KCPMUX_KCP_NODELAY                    (0)
 #define KCPMUX_KCP_NODELAY_INTERVAL           (10)
 #define KCPMUX_KCP_NODELAY_FASTACK            (3)

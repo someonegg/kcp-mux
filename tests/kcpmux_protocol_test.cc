@@ -8,6 +8,14 @@ struct RejectingConnectContext : TestContext {
     int rejected_conn_close_calls = 0;
 };
 
+enum class ResponseMode { Zero, Normal, Maximum, Oversized };
+
+struct ResponseConnectContext : RejectingConnectContext {
+    ResponseMode mode = ResponseMode::Zero;
+    uint8_t *response_data = nullptr;
+    unsigned response_len_on_entry = 0;
+};
+
 void rejected_conn_close_notify(kcpmux_conn_t *, int, void *user_data)
 {
     auto *context = static_cast<RejectingConnectContext *>(user_data);
@@ -24,6 +32,49 @@ int reject_conn_after_installing_callbacks(
     callbacks.conn_close_notify = rejected_conn_close_notify;
     kcpmux_conn_set_callbacks(conn, &callbacks, user_data);
     return KCPMUX_ACK_RESULT_ERROR;
+}
+
+int write_connect_response(
+    kcpmux_conn_t *conn,
+    const kcpmux_proto_ext_t *,
+    kcpmux_proto_ext_t *response,
+    void *user_data)
+{
+    auto *context = static_cast<ResponseConnectContext *>(user_data);
+    context->response_data = response->data;
+    context->response_len_on_entry = response->len;
+    kcpmux_conn_callbacks_t callbacks{};
+    callbacks.conn_close_notify = rejected_conn_close_notify;
+    kcpmux_conn_set_callbacks(conn, &callbacks, user_data);
+
+    switch (context->mode) {
+    case ResponseMode::Zero:
+        response->len = 0;
+        break;
+    case ResponseMode::Normal:
+        response->data[0] = 0x31;
+        response->data[1] = 0x32;
+        response->len = 2;
+        break;
+    case ResponseMode::Maximum:
+        memset(response->data, 0x5a, KCPMUX_PROTO_EXT_MAX_LEN);
+        response->len = KCPMUX_PROTO_EXT_MAX_LEN;
+        break;
+    case ResponseMode::Oversized:
+        response->len = KCPMUX_PROTO_EXT_MAX_LEN + 1;
+        break;
+    }
+    return KCPMUX_ACK_RESULT_OK;
+}
+
+static kcpmux_engine_t *create_response_engine(ResponseConnectContext *context)
+{
+    kcpmux_engine_callbacks_t callbacks{};
+    callbacks.set_timer = test_set_timer;
+    callbacks.write_socketv = test_write_socketv;
+    callbacks.monotonic_time_ms = test_monotonic_time_ms;
+    callbacks.conn_connect_notify = write_connect_response;
+    return kcpmux_engine_create(nullptr, nullptr, nullptr, &callbacks, context, nullptr);
 }
 
 // ============================================================================
@@ -84,6 +135,58 @@ TEST(kcpmux_protocol, conn_connect_ack_message_format) {
     EXPECT_EQ(pkt.size(), 8u + ext_len);
 
     kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_protocol, passive_connect_response_uses_embedded_array) {
+    for (ResponseMode mode : {ResponseMode::Zero, ResponseMode::Normal,
+                              ResponseMode::Maximum}) {
+        ResponseConnectContext ctx;
+        ctx.mode = mode;
+        kcpmux_engine_t *engine = create_response_engine(&ctx);
+        ASSERT_NE(engine, nullptr);
+        TestAddr addr(0x7f000001, 12345);
+        auto connect_msg = build_conn_connect();
+
+        ASSERT_EQ(kcpmux_engine_input(
+                      engine, connect_msg.data(), connect_msg.size(), addr.get()), 0);
+        kcpmux_conn_t *conn = kcpmux_engine_get_conn_by_addr(engine, addr.get());
+        ASSERT_NE(conn, nullptr);
+        EXPECT_EQ(ctx.response_len_on_entry, 0u);
+        EXPECT_EQ(ctx.response_data, conn->self_proto_ext.data);
+        ASSERT_EQ(ctx.sent_packets.size(), 1u);
+        const auto &ack = ctx.sent_packets.back();
+        ASSERT_GE(ack.size(), 8u);
+        EXPECT_EQ(ack[5], KCPMUX_ACK_RESULT_OK);
+        unsigned expected = mode == ResponseMode::Zero ? 0u
+            : mode == ResponseMode::Normal ? 2u : KCPMUX_PROTO_EXT_MAX_LEN;
+        EXPECT_EQ(static_cast<unsigned>((ack[6] << 8) | ack[7]), expected);
+        EXPECT_EQ(ack.size(), 8u + expected);
+        if (expected > 0) {
+            const uint8_t byte = mode == ResponseMode::Normal ? 0x31 : 0x5a;
+            EXPECT_EQ(ack[8], byte);
+        }
+        kcpmux_engine_destroy(engine);
+    }
+}
+
+TEST(kcpmux_protocol, invalid_passive_connect_response_is_generically_rejected) {
+    for (ResponseMode mode : {ResponseMode::Oversized}) {
+        ResponseConnectContext ctx;
+        ctx.mode = mode;
+        kcpmux_engine_t *engine = create_response_engine(&ctx);
+        ASSERT_NE(engine, nullptr);
+        TestAddr addr(0x7f000001, 12345);
+        auto connect_msg = build_conn_connect();
+
+        ASSERT_EQ(kcpmux_engine_input(
+                      engine, connect_msg.data(), connect_msg.size(), addr.get()), 0);
+        EXPECT_EQ(kcpmux_engine_get_conn_by_addr(engine, addr.get()), nullptr);
+        EXPECT_EQ(ctx.rejected_conn_close_calls, 0);
+        ASSERT_EQ(ctx.sent_packets.size(), 1u);
+        EXPECT_EQ(ctx.sent_packets.back()[5], KCPMUX_ACK_RESULT_ERROR);
+        EXPECT_EQ(ctx.sent_packets.back().size(), 8u);
+        kcpmux_engine_destroy(engine);
+    }
 }
 
 TEST(kcpmux_protocol, rejected_passive_conn_discards_installed_callbacks) {

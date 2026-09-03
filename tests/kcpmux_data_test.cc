@@ -120,6 +120,61 @@ TEST_F(kcpmux_data, send_recv_small_data) {
     EXPECT_EQ(std::string((char*)recv_buf, ret), send_data);
 }
 
+TEST_F(kcpmux_data, draining_read_queue_automatically_rearms_notification) {
+    establish_connection();
+    create_streams();
+    const int notifications_before = ctx.server_ctx.read_notify_count;
+    kcpmux_stream_stats_t stats_before{};
+    kcpmux_stream_get_stats(server_stream, &stats_before);
+    const uint8_t first = 0x11;
+    const uint8_t second = 0x22;
+    uint8_t received = 0;
+
+    ASSERT_EQ(kcpmux_stream_send(client_stream, &first, 1, 1), 1);
+    pump_kcp(ctx);
+    EXPECT_EQ(ctx.server_ctx.read_notify_count, notifications_before + 1);
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, &received, 1), 1);
+    EXPECT_EQ(received, first);
+
+    kcpmux_stream_stats_t after_drain{};
+    kcpmux_stream_get_stats(server_stream, &after_drain);
+    EXPECT_EQ(after_drain.read_block_count, stats_before.read_block_count + 1);
+
+    ASSERT_EQ(kcpmux_stream_send(client_stream, &second, 1, 1), 1);
+    pump_kcp(ctx);
+    EXPECT_EQ(ctx.server_ctx.read_notify_count, notifications_before + 2);
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, &received, 1), 1);
+    EXPECT_EQ(received, second);
+}
+
+TEST_F(kcpmux_data, readable_queue_notifies_once_until_fully_drained) {
+    establish_connection();
+    create_streams();
+    const int notifications_before = ctx.server_ctx.read_notify_count;
+    const uint8_t first = 0x41;
+    const uint8_t second = 0x42;
+    uint8_t received = 0;
+
+    ASSERT_EQ(kcpmux_stream_send(client_stream, &first, 1, 0), 1);
+    ASSERT_EQ(kcpmux_stream_send(client_stream, &second, 1, 1), 1);
+    pump_kcp(ctx);
+    EXPECT_EQ(ctx.server_ctx.read_notify_count, notifications_before + 1);
+
+    kcpmux_stream_stats_t before{};
+    kcpmux_stream_get_stats(server_stream, &before);
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, &received, 1), 1);
+    kcpmux_stream_stats_t middle{};
+    kcpmux_stream_get_stats(server_stream, &middle);
+    EXPECT_EQ(middle.read_block_count, before.read_block_count);
+    EXPECT_EQ(ctx.server_ctx.read_notify_count, notifications_before + 1);
+
+    ASSERT_EQ(kcpmux_stream_recv(server_stream, &received, 1), 1);
+    kcpmux_stream_stats_t after{};
+    kcpmux_stream_get_stats(server_stream, &after);
+    EXPECT_EQ(after.read_block_count, before.read_block_count + 1);
+    EXPECT_EQ(ctx.server_ctx.read_notify_count, notifications_before + 1);
+}
+
 TEST_F(kcpmux_data, sendv_flattens_iovecs_and_preserves_mss_messages) {
     establish_connection();
     kcpmux_stream_config_t config;

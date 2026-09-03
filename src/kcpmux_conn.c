@@ -263,13 +263,12 @@ kcpmux_conn_t *kcpmux_conn_connect(
     }
 
     // Set self protocol extension data
-    if (proto_ext && proto_ext->data && proto_ext->len > 0) {
+    if (proto_ext && proto_ext->len > 0) {
         unsigned len = proto_ext->len;
         if (len > KCPMUX_PROTO_EXT_MAX_LEN) {
             len = KCPMUX_PROTO_EXT_MAX_LEN;
         }
-        memcpy(conn->self_proto_ext_buf, proto_ext->data, len);
-        conn->self_proto_ext.data = conn->self_proto_ext_buf;
+        memcpy(conn->self_proto_ext.data, proto_ext->data, len);
         conn->self_proto_ext.len = len;
     }
 
@@ -424,7 +423,9 @@ void kcpmux_conn_set_state(kcpmux_conn_t *conn, uint8_t new_state)
 
     kcpmux_conn_refresh_timer(conn, kcpmux_engine_now(conn->engine));
 
-    if (conn->callbacks.conn_state_changed) {
+    if (new_state != KCPMUX_CONN_STATE_CLOSED &&
+        new_state != KCPMUX_CONN_STATE_ERROR &&
+        conn->callbacks.conn_state_changed) {
         conn->callbacks.conn_state_changed(conn, old_state, new_state, conn->user_data);
     }
 }

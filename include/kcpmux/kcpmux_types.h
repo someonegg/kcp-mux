@@ -98,8 +98,8 @@ typedef enum {
 // ============================================================================
 
 typedef struct kcpmux_proto_ext_s {
-    uint8_t  *data;                   // Extension data pointer
-    unsigned  len;                    // Extension data length (0 ~ KCPMUX_PROTO_EXT_MAX_LEN)
+    uint8_t   data[KCPMUX_PROTO_EXT_MAX_LEN]; // Extension data
+    unsigned  len;                            // Extension data length (0 ~ KCPMUX_PROTO_EXT_MAX_LEN)
 } kcpmux_proto_ext_t;
 
 // ============================================================================
@@ -263,8 +263,13 @@ typedef struct kcpmux_engine_callbacks_s {
     // Handles a remote connection already present in engine lookup. Only
     // getters and the conn config/callback setters may be called here. NULL
     // disables passive creation. KCPMUX_ACK_RESULT_OK accepts; any other value
-    // rejects. Do not retain a rejected handle; its installed callbacks and
-    // user data are discarded without close notification.
+    // rejects.
+    // resp_proto_ext->len is 0 on entry. To include an extension in the
+    // response, write at most KCPMUX_PROTO_EXT_MAX_LEN bytes to data, then set
+    // len to the actual number of bytes written. Keep len as 0 to send no
+    // extension.
+    // Do not retain a rejected handle; its installed callbacks and user data
+    // are discarded without close notification.
     int (*conn_connect_notify)(
         kcpmux_conn_t *conn,
         const kcpmux_proto_ext_t *proto_ext,
@@ -273,16 +278,18 @@ typedef struct kcpmux_engine_callbacks_s {
 } kcpmux_engine_callbacks_t;
 
 typedef struct kcpmux_conn_callbacks_s {
-    // Notifications may call connection query APIs, update external state, or
-    // enqueue work, but must not call APIs that mutate kcpmux state (for example,
-    // creating a stream). Keep the external user_data wrapper alive until close.
+    // Reports transitions to non-terminal states; initial assignment and
+    // CLOSED/ERROR are excluded. Terminal states use conn_close_notify.
+    // May call connection query APIs, update external state, or enqueue work,
+    // but must not mutate kcpmux state. Keep user_data alive until close.
     void (*conn_state_changed)(
         kcpmux_conn_t *conn,
         uint8_t old_state,
         uint8_t new_state,
         void *user_data);
 
-    // The state is CLOSED or ERROR. The handle becomes invalid on return.
+    // Reports terminal lifecycle completion, including a locally initiated
+    // close. The state is CLOSED or ERROR. The handle becomes invalid on return.
     void (*conn_close_notify)(kcpmux_conn_t *conn, int reason, void *user_data);
 
     // Handles a payload-created remote stream already present in connection
@@ -295,22 +302,26 @@ typedef struct kcpmux_conn_callbacks_s {
 } kcpmux_conn_callbacks_t;
 
 typedef struct kcpmux_stream_callbacks_s {
-    // Notifications may call stream query APIs, update external state, or enqueue
-    // work, but must not call APIs that mutate kcpmux state. Keep the external
-    // user_data wrapper alive until close.
+    // Reports transitions to non-terminal states; initial assignment and
+    // CLOSED/ERROR are excluded. Terminal states use stream_close_notify.
+    // May call stream query APIs, update external state, or enqueue work, but
+    // must not mutate kcpmux state. Keep user_data alive until close.
     void (*stream_state_changed)(
         kcpmux_stream_t *stream,
         uint8_t old_state,
         uint8_t new_state,
         void *user_data);
 
-    // Edge-triggered transition from blocked to readable.
+    // Edge-triggered transition from blocked to readable. Do not call recv
+    // synchronously; enqueue read work for the event loop instead.
     void (*stream_read_notify)(kcpmux_stream_t *stream, void *user_data);
 
-    // Edge-triggered transition from blocked to writable.
+    // Edge-triggered transition from blocked to writable. Do not call send
+    // synchronously; enqueue write work for the event loop instead.
     void (*stream_write_notify)(kcpmux_stream_t *stream, void *user_data);
 
-    // The state is CLOSED or ERROR. The handle becomes invalid on return.
+    // Reports terminal lifecycle completion, including a locally initiated
+    // close. The state is CLOSED or ERROR. The handle becomes invalid on return.
     void (*stream_close_notify)(kcpmux_stream_t *stream, int reason, void *user_data);
 } kcpmux_stream_callbacks_t;
 

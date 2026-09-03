@@ -211,7 +211,6 @@ int demo_endpoint_init(
 
     callbacks->set_timer = demo_set_timer;
     callbacks->write_socketv = demo_write_socketv;
-    callbacks->log_write = demo_log_write;
     callbacks->monotonic_time_ms = demo_engine_time_ms;
 
     endpoint->app_user_data = user_data;
@@ -355,16 +354,4 @@ int64_t demo_engine_time_ms(void *user_data)
 {
     (void)user_data;
     return demo_monotonic_time_ms();
-}
-
-void demo_log_write(int level, const char *buf, unsigned size, void *user_data)
-{
-    demo_endpoint_t *endpoint = (demo_endpoint_t *)user_data;
-    if (endpoint != NULL && endpoint->quiet) {
-        return;
-    }
-
-    (void)fprintf(stderr, "[kcpmux:%d] ", level);
-    (void)fwrite(buf, 1, size, stderr);
-    (void)fputc('\n', stderr);
 }

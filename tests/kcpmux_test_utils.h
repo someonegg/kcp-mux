@@ -187,7 +187,7 @@ static int test_conn_connect_notify(
 {
     (void)conn;        // Unused
     (void)proto_ext;   // Unused
-    (void)resp_proto_ext;  // Unused
+    resp_proto_ext->len = 0;
     TestContext *ctx = (TestContext *)user_data;
     ctx->conn_notify_count++;
     return ctx->conn_notify_result;

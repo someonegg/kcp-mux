@@ -525,6 +525,10 @@ TEST(kcpmux_lifecycle, conn_connect_rejected) {
                   ctx.client_engine, ctx.server_addr.get()), nullptr);
     EXPECT_EQ(ctx.client_ctx.conn_close_count, 1);
     EXPECT_EQ(ctx.client_ctx.conn_close_reason, KCPMUX_CLOSE_REASON_REJECTED);
+    for (const auto &change : ctx.client_ctx.conn_state_changes) {
+        EXPECT_NE(change.second, KCPMUX_CONN_STATE_CLOSED);
+        EXPECT_NE(change.second, KCPMUX_CONN_STATE_ERROR);
+    }
 
     ctx.teardown();
 }

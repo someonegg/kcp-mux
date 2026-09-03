@@ -17,7 +17,7 @@ static void *kcpmux_default_ikcp_create(uint32_t kcp_conv, void *kcp_user, void 
         KCPMUX_KCP_NODELAY,
         KCPMUX_KCP_NODELAY_INTERVAL,
         KCPMUX_KCP_NODELAY_FASTACK,
-        KCPMUX_KCP_NODELAY_FLOWCTRL);
+        !KCPMUX_KCP_NODELAY_FLOWCTRL);
     return kcp;
 }
 

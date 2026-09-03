@@ -161,7 +161,7 @@ static int demo_server_conn_connect_notify(
     kcpmux_conn_callbacks_t callbacks;
 
     (void)proto_ext;
-    (void)resp_proto_ext;
+    resp_proto_ext->len = 0;
 
     memset(&callbacks, 0, sizeof(callbacks));
     callbacks.conn_state_changed = demo_server_conn_state_changed;

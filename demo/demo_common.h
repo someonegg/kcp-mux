@@ -49,6 +49,5 @@ int demo_write_socketv(
     const kcpmux_addr_t *addr,
     void *user_data);
 int64_t demo_engine_time_ms(void *user_data);
-void demo_log_write(int level, const char *buf, unsigned size, void *user_data);
 
 #endif

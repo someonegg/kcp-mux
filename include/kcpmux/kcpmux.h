@@ -16,11 +16,15 @@ void kcpmux_stream_config_init(kcpmux_stream_config_t *config);
 
 // Engine API
 
-// callbacks, set_timer, write_socketv, and monotonic_time_ms are required.
-// required for transport; log_write and conn_connect_notify are optional. A
-// custom kcp_ops must provide every required operation; sendv is optional and
-// uses an MSS-sized scalar-send fallback when absent. The operations table is
-// copied during creation. Invalid defaults return NULL.
+// callbacks, set_timer, write_socketv, and monotonic_time_ms are required;
+// conn_connect_notify is optional. A custom kcp_ops must provide every required
+// operation; sendv is optional and uses an MSS-sized scalar-send fallback when
+// absent. The operations table is copied during creation. Invalid defaults return NULL.
+//
+// Thread confinement: every API call for one engine, including timer-driven
+// update and transport input, and every callback from that engine must execute
+// serially on the same event-loop thread. Other threads may only enqueue work
+// for that thread. kcpmux provides no locking or thread-safety guarantees.
 kcpmux_engine_t *kcpmux_engine_create(
     const kcpmux_engine_config_t *config,
     const kcpmux_conn_config_t *default_conn_config,
@@ -159,7 +163,9 @@ void kcpmux_stream_finish_batch(kcpmux_stream_t *stream);
 int kcpmux_stream_peek_size(kcpmux_stream_t *stream);
 
 // Receives one complete message. Use kcpmux_stream_peek_size() to size the
-// buffer. Returns bytes received, 0 if unavailable, or a negative error.
+// buffer. Successfully consuming the last complete message automatically rearms
+// the next blocked-to-readable notification. Returns bytes received, 0 if
+// unavailable, or a negative error.
 int kcpmux_stream_recv(kcpmux_stream_t *stream, uint8_t *buf, unsigned size);
 
 uint32_t kcpmux_stream_id(kcpmux_stream_t *stream);
