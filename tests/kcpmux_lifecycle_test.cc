@@ -467,26 +467,17 @@ TEST(kcpmux_lifecycle, conn_state_callbacks) {
         nullptr,
         &client_callbacks,
         &ctx.client_ctx);
-    (void)client_conn;
+    ASSERT_NE(client_conn, nullptr);
+    EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CONNECTING);
+    EXPECT_TRUE(ctx.client_ctx.conn_state_changes.empty());
+    EXPECT_EQ(ctx.client_ctx.conn_close_count, 0);
+    EXPECT_EQ(ctx.client_ctx.stream_notify_count, 0);
 
-    // Initial state change: INIT -> CONNECTING
-    ASSERT_GE(ctx.client_ctx.conn_state_changes.size(), 1u);
-    EXPECT_EQ(ctx.client_ctx.conn_state_changes[0].first, KCPMUX_CONN_STATE_INIT);
-    EXPECT_EQ(ctx.client_ctx.conn_state_changes[0].second, KCPMUX_CONN_STATE_CONNECTING);
-
-    // Complete handshake
+    // Complete handshake; the initial state must never be replayed.
     ctx.deliver_all();
-
-    // Should have state change: CONNECTING -> CONNECTED
-    bool found_connected = false;
-    for (auto &change : ctx.client_ctx.conn_state_changes) {
-        if (change.first == KCPMUX_CONN_STATE_CONNECTING &&
-            change.second == KCPMUX_CONN_STATE_CONNECTED) {
-            found_connected = true;
-            break;
-        }
-    }
-    EXPECT_TRUE(found_connected);
+    ASSERT_EQ(ctx.client_ctx.conn_state_changes.size(), 1u);
+    EXPECT_EQ(ctx.client_ctx.conn_state_changes[0].first, KCPMUX_CONN_STATE_CONNECTING);
+    EXPECT_EQ(ctx.client_ctx.conn_state_changes[0].second, KCPMUX_CONN_STATE_CONNECTED);
 
     ctx.teardown();
 }
@@ -519,6 +510,8 @@ TEST(kcpmux_lifecycle, conn_connect_rejected) {
     // Deliver reject ACK to client
     ctx.deliver_server_to_client();
 
+    EXPECT_TRUE(ctx.client_ctx.conn_state_changes.empty());
+
     // Client should be in ERROR state
     EXPECT_EQ(ctx.client_ctx.conn_close_state, KCPMUX_CONN_STATE_ERROR);
     EXPECT_EQ(kcpmux_engine_get_conn_by_addr(
@@ -531,6 +524,66 @@ TEST(kcpmux_lifecycle, conn_connect_rejected) {
     }
 
     ctx.teardown();
+}
+
+TEST(kcpmux_lifecycle, conn_initial_send_failure_defers_notifications) {
+    TestContext ctx;
+    kcpmux_engine_t *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    engine->callbacks.write_socketv = [](const kcpmux_iovec_t *, unsigned,
+                                         const kcpmux_addr_t *, void *) { return 0; };
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.ctrl_timeout_ms = 100;
+    config.connect_retries = 1;
+    TestAddr addr(0x7f000001, 12345);
+    auto callbacks = create_conn_callbacks(&ctx);
+    auto *conn = kcpmux_conn_connect(engine, addr.get(), &config, nullptr, &callbacks, &ctx);
+    ASSERT_NE(conn, nullptr);
+    EXPECT_EQ(kcpmux_conn_get_state(conn), KCPMUX_CONN_STATE_CONNECTING);
+    EXPECT_TRUE(ctx.conn_state_changes.empty());
+    EXPECT_EQ(ctx.conn_close_count, 0);
+    EXPECT_EQ(ctx.stream_notify_count, 0);
+    EXPECT_EQ(engine->stats.tx_error_packets, 1u);
+    EXPECT_EQ(ctx.timer_probe.deadline_ms, 100);
+
+    engine->callbacks.write_socketv = test_write_socketv;
+    ctx.current_time_ms = 100;
+    kcpmux_engine_update(engine);
+    ASSERT_EQ(ctx.sent_packets.size(), 1u);
+    EXPECT_EQ(ctx.sent_packets[0][0], KCPMUX_MSG_CONN_CONNECT);
+    EXPECT_EQ(ctx.conn_close_count, 0);
+    ctx.current_time_ms = 200;
+    kcpmux_engine_update(engine);
+    EXPECT_TRUE(ctx.conn_state_changes.empty());
+    EXPECT_EQ(ctx.conn_close_count, 1);
+    EXPECT_EQ(ctx.conn_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
+    kcpmux_engine_destroy(engine);
+}
+
+TEST(kcpmux_lifecycle, conn_close_immediately_after_connect) {
+    TestContext ctx;
+    auto *engine = create_test_engine(&ctx);
+    ASSERT_NE(engine, nullptr);
+    kcpmux_conn_config_t config;
+    kcpmux_conn_config_init(&config);
+    config.close_retries = 0;
+    TestAddr addr(0x7f000001, 12345);
+    auto callbacks = create_conn_callbacks(&ctx);
+    auto *conn = kcpmux_conn_connect(engine, addr.get(), &config, nullptr, &callbacks, &ctx);
+    ASSERT_NE(conn, nullptr);
+    EXPECT_TRUE(ctx.conn_state_changes.empty());
+    EXPECT_EQ(ctx.conn_close_count, 0);
+    ASSERT_EQ(kcpmux_conn_close(conn), 0);
+    ASSERT_EQ(ctx.conn_state_changes.size(), 1u);
+    EXPECT_EQ(ctx.conn_state_changes[0].first, KCPMUX_CONN_STATE_CONNECTING);
+    EXPECT_EQ(ctx.conn_state_changes[0].second, KCPMUX_CONN_STATE_CLOSING);
+    EXPECT_EQ(ctx.conn_close_count, 1);
+    EXPECT_EQ(ctx.conn_close_reason, KCPMUX_CLOSE_REASON_NORMAL);
+    kcpmux_engine_update(engine);
+    EXPECT_EQ(ctx.conn_state_changes.size(), 1u);
+    EXPECT_EQ(ctx.conn_close_count, 1);
+    kcpmux_engine_destroy(engine);
 }
 
 TEST(kcpmux_lifecycle, conn_duplicate_connect) {
@@ -565,11 +618,15 @@ TEST(kcpmux_lifecycle, closing_conn_is_replaced_by_distinct_generation) {
     ASSERT_EQ(kcpmux_conn_close(old_conn), 0);
     ASSERT_EQ(old_conn->state, KCPMUX_CONN_STATE_CLOSING);
 
+    TestContext new_ctx;
     const size_t packets_before = ctx.sent_packets.size();
     kcpmux_conn_t *new_conn = kcpmux_conn_connect(
-        engine, addr.get(), nullptr, nullptr, &callbacks, &ctx);
+        engine, addr.get(), nullptr, nullptr, &callbacks, &new_ctx);
     ASSERT_NE(new_conn, nullptr);
 
+    EXPECT_TRUE(new_ctx.conn_state_changes.empty());
+    EXPECT_EQ(new_ctx.conn_close_count, 0);
+    EXPECT_EQ(new_ctx.stream_notify_count, 0);
     EXPECT_EQ(ctx.conn_close_count, 1);
     EXPECT_EQ(ctx.conn_close_reason, KCPMUX_CLOSE_REASON_REPLACED);
     EXPECT_EQ(ctx.conn_close_state, KCPMUX_CONN_STATE_CLOSED);
@@ -695,6 +752,7 @@ TEST(kcpmux_lifecycle, conn_connect_timeout_retry) {
     EXPECT_EQ(kcpmux_engine_get_conn_by_addr(engine, addr.get()), nullptr);
     EXPECT_EQ(ctx.conn_close_count, 1);  // close_notify should be called
     EXPECT_EQ(ctx.conn_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
+    EXPECT_TRUE(ctx.conn_state_changes.empty());
 
     kcpmux_engine_destroy(engine);
 }

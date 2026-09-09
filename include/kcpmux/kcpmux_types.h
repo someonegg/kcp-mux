@@ -280,6 +280,8 @@ typedef struct kcpmux_engine_callbacks_s {
 typedef struct kcpmux_conn_callbacks_s {
     // Reports transitions to non-terminal states; initial assignment and
     // CLOSED/ERROR are excluded. Terminal states use conn_close_notify.
+    // An initiator starts in CONNECTING without notification; a passive
+    // connection still reports INIT -> CONNECTED after acceptance.
     // May call connection query APIs, update external state, or enqueue work,
     // but must not mutate kcpmux state. Keep user_data alive until close.
     void (*conn_state_changed)(

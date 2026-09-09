@@ -282,9 +282,11 @@ kcpmux_conn_t *kcpmux_conn_connect(
     // Add to engine
     kcpmux_engine_add_conn(engine, conn);
 
-    // Anchor the first control deadline before exposing CONNECTING state.
+    // CONNECTING is the initiator's initial public state, not a transition
+    // notification: the caller has not received the new handle yet.
     conn->last_ctrl_ts = kcpmux_engine_now(engine);
-    kcpmux_conn_set_state(conn, KCPMUX_CONN_STATE_CONNECTING);
+    conn->state = KCPMUX_CONN_STATE_CONNECTING;
+    kcpmux_conn_refresh_timer(conn, conn->last_ctrl_ts);
     kcpmux_conn_send_connect(conn);
 
     kcpmux_engine_operation_leave(engine);
