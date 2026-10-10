@@ -12,16 +12,35 @@
 // Hash table helper functions
 // ============================================================================
 
-// Connection compare function (variable length address data)
-// Returns: 1 if match, 0 if not match
+typedef struct kcpmux_conn_key_s {
+    const kcpmux_addr_t *addr;
+    uint64_t id;
+} kcpmux_conn_key_t;
+
+static int kcpmux_conn_key_matches(const kcpmux_conn_key_t *key,
+    const kcpmux_conn_t *conn, uint64_t id)
+{
+    return key->id == id && key->addr->addrlen == conn->peer_addr.addrlen &&
+        memcmp(key->addr->addr, conn->peer_addr.addr, key->addr->addrlen) == 0;
+}
+
+static uint32_t kcpmux_conn_key_hash(const kcpmux_conn_key_t *key)
+{
+    // Hash fields separately, avoiding struct padding and unaligned access.
+    return kcpmux_hash32(key->addr->addr, key->addr->addrlen) ^
+        kcpmux_hash32(&key->id, sizeof(key->id));
+}
+
 static int __conn_cmp(void *key, list_head *entry)
 {
-    const kcpmux_addr_t *addr = (const kcpmux_addr_t *)key;
     kcpmux_conn_t *conn = list_entry(entry, kcpmux_conn_t, hash_node);
-    if (addr->addrlen != conn->peer_addr.addrlen) {
-        return 0;
-    }
-    return memcmp(addr->addr, conn->peer_addr.addr, addr->addrlen) == 0;
+    return kcpmux_conn_key_matches(key, conn, conn->local_connection_id);
+}
+
+static int __handshake_cmp(void *key, list_head *entry)
+{
+    kcpmux_conn_t *conn = list_entry(entry, kcpmux_conn_t, handshake_hash_node);
+    return kcpmux_conn_key_matches(key, conn, conn->peer_connection_id);
 }
 
 // Connection free function (called when hash table is destroyed)
@@ -97,7 +116,7 @@ int kcpmux_stream_config_prepare(
     if (!dst || !src || src->ctrl_timeout_ms == 0 ||
         src->drain_timeout_ms == 0 ||
         src->kcp_mss == 0 ||
-        src->kcp_mss > KCPMUX_PROTO_MSG_MAX_LEN - 8 - KCPMUX_IKCP_OVERHEAD ||
+        src->kcp_mss > KCPMUX_PROTO_MSG_MAX_LEN - KCPMUX_PROTO_STREAM_HEADER_LEN - KCPMUX_IKCP_OVERHEAD ||
         src->send_pause_threshold == 0 ||
         src->send_resume_threshold > src->send_pause_threshold) {
         return 0;
@@ -191,7 +210,27 @@ kcpmux_engine_t *kcpmux_engine_create(
         return NULL;
     }
 
+    engine->handshake_map = kcpmux_htb_new(64, __handshake_cmp, __conn_free);
+    if (!engine->handshake_map) {
+        kcpmux_htb_destroy(engine->conn_map);
+        kcpmux_timer_manager_destroy(&engine->timer_manager);
+        free(engine);
+        return NULL;
+    }
+    // IDs are routing identifiers, not authentication tokens. Randomize the
+    // starting point; monotonic allocation prevents reuse within this engine.
+    engine->next_connection_id = kcpmux_engine_random_u64(engine) & (UINT64_MAX >> 1);
+    if (engine->next_connection_id == 0) engine->next_connection_id = 1;
+
     return engine;
+}
+
+uint64_t kcpmux_engine_random_u64(kcpmux_engine_t *engine)
+{
+    if (engine->callbacks.random_u64) {
+        return engine->callbacks.random_u64(engine->user_data);
+    }
+    return ((uint64_t)(unsigned)rand() << 32) | (uint64_t)(unsigned)rand();
 }
 
 void kcpmux_engine_destroy(kcpmux_engine_t *engine)
@@ -220,6 +259,7 @@ void kcpmux_engine_destroy(kcpmux_engine_t *engine)
     kcpmux_engine_operation_leave(engine);
 
     // All pending releases have drained at the operation boundary.
+    kcpmux_htb_destroy(engine->handshake_map);
     kcpmux_htb_destroy(engine->conn_map);
     kcpmux_timer_manager_destroy(&engine->timer_manager);
 
@@ -494,8 +534,13 @@ void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn)
 {
     if (!engine || !conn || conn->internal_closed || conn->in_engine_map) return;
 
-    uint32_t hash = kcpmux_hash32(conn->peer_addr.addr, conn->peer_addr.addrlen);
-    kcpmux_htb_add(engine->conn_map, &conn->hash_node, &conn->peer_addr, hash);
+    kcpmux_conn_key_t key = { &conn->peer_addr, conn->local_connection_id };
+    kcpmux_htb_add(engine->conn_map, &conn->hash_node, &key, kcpmux_conn_key_hash(&key));
+    if (!conn->is_initiator) {
+        key.id = conn->peer_connection_id;
+        kcpmux_htb_add(engine->handshake_map, &conn->handshake_hash_node,
+            &key, kcpmux_conn_key_hash(&key));
+    }
     engine->conn_count++;
     conn->in_engine_map = 1;
 
@@ -507,6 +552,9 @@ void kcpmux_engine_remove_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn)
 {
     if (!engine || !conn || !conn->in_engine_map) return;
 
+    if (!conn->is_initiator) {
+        kcpmux_htb_del(engine->handshake_map, &conn->handshake_hash_node);
+    }
     kcpmux_htb_del(engine->conn_map, &conn->hash_node);
     engine->conn_count--;
     conn->in_engine_map = 0;
@@ -515,15 +563,26 @@ void kcpmux_engine_remove_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn)
     engine->stats.conn_count = engine->conn_count;
 }
 
-kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(kcpmux_engine_t *engine, const kcpmux_addr_t *addr)
+kcpmux_conn_t *kcpmux_engine_get_conn_by_id(
+    kcpmux_engine_t *engine, const kcpmux_addr_t *addr, uint64_t local_connection_id)
 {
-    if (!engine || !addr || !addr->addr) return NULL;
+    if (!engine || !addr || !addr->addr || !addr->addrlen ||
+        addr->addrlen > KCPMUX_ADDR_MAX_LEN || !local_connection_id) return NULL;
 
-    uint32_t hash = kcpmux_hash32(addr->addr, addr->addrlen);
-    list_head *node = kcpmux_htb_find(engine->conn_map, (void *)addr, hash);
-    if (!node) return NULL;
+    kcpmux_conn_key_t key = { addr, local_connection_id };
+    list_head *node = kcpmux_htb_find(engine->conn_map, &key, kcpmux_conn_key_hash(&key));
+    return node ? list_entry(node, kcpmux_conn_t, hash_node) : NULL;
+}
 
-    return list_entry(node, kcpmux_conn_t, hash_node);
+kcpmux_conn_t *kcpmux_engine_get_passive_conn(
+    kcpmux_engine_t *engine, const kcpmux_addr_t *addr, uint64_t peer_connection_id)
+{
+    if (!engine || !addr || !addr->addr || !addr->addrlen ||
+        addr->addrlen > KCPMUX_ADDR_MAX_LEN || !peer_connection_id) return NULL;
+
+    kcpmux_conn_key_t key = { addr, peer_connection_id };
+    list_head *node = kcpmux_htb_find(engine->handshake_map, &key, kcpmux_conn_key_hash(&key));
+    return node ? list_entry(node, kcpmux_conn_t, handshake_hash_node) : NULL;
 }
 
 void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *stats)

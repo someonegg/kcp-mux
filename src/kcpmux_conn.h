@@ -9,14 +9,16 @@
 // ============================================================================
 
 struct kcpmux_conn_s {
-    list_head                 hash_node;       // Hash table node
+    list_head                 hash_node;       // Local ID index node
+    list_head                 handshake_hash_node; // Passive handshake index node
 
     uint8_t                   state;           // Connection state
     uint8_t                   is_initiator;    // Is connection initiator
     uint8_t                   internal_closed; // If internal closed
     uint8_t                   in_engine_map;   // Hash membership guard
     uint8_t                   peer_stream_id_initialized;
-    uint32_t                  generation_id;   // 24-bit wire generation
+    uint64_t                  local_connection_id;
+    uint64_t                  peer_connection_id;
     kcpmux_engine_t          *engine;          // Owning engine
     kcpmux_conn_config_t      config;          // Connection config
     kcpmux_conn_callbacks_t   callbacks;       // Connection callbacks

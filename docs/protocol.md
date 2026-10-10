@@ -1,23 +1,31 @@
 # KCPMUX Protocol And Lifecycle
 
-This document describes the current implementation, mainly [src/kcpmux_protocol.c](../src/kcpmux_protocol.c). The protocol layer wraps connection control, stream control, and KCP output packets into lower-layer datagrams. Actual socket I/O, timing, and peer address handling are provided by upper-layer callbacks and `kcpmux_engine`.
+This document describes the wire protocol and lifecycle implemented in
+[src/kcpmux_protocol.c](../src/kcpmux_protocol.c). The caller and `kcpmux_engine`
+provide socket I/O, timing, and peer address handling.
 
 ## Overview
 
-KCPMUX multiplexes multiple streams over one logical connection identified by a peer address. Each stream is driven by an independent KCP state machine. Every lower-layer datagram is a KCPMUX message:
+KCPMUX multiplexes independent connections over one UDP four-tuple, including
+simultaneous initiation. Each connection contains streams with independent KCP
+state. Every datagram has this common header:
 
 ```text
-+---------+------------------+-------------------+
-| type(1) | generation_id(3) | message body(...) |
-+---------+------------------+-------------------+
+type(u8) | destination_connection_id(u64) | message body(...)
 ```
 
 General rules:
 
 - Multi-byte integers use network byte order, meaning big-endian.
-- `generation_id` is a nonzero 24-bit connection generation. Except for `CONN_CONNECT`, packets are accepted only when both peer address and generation match.
+- The common header is 9 bytes. Except for `CONN_CONNECT`, the destination ID
+  must be nonzero and match a local connection ID at the receiving endpoint,
+  with the same source peer address.
+- Each endpoint allocates its own nonzero 64-bit connection ID, never reused
+  during the engine's lifetime. ID exhaustion fails connection creation.
+- Connection IDs are routing identifiers, not authentication tokens. Address
+  migration and stale-packet isolation across engine restarts are not provided.
 - `stream_id` is a nonzero 32-bit unsigned integer; initiators use odd ids and acceptors use even ids.
-- The current protocol version is `KCPMUX_VERSION = 3`.
+- The current protocol version is `KCPMUX_VERSION = 4`.
 - Senders cap generated protocol messages at `KCPMUX_PROTO_MSG_MAX_LEN = 1500`.
 - Protocol extension data is limited to `KCPMUX_PROTO_EXT_MAX_LEN = 512`.
 - The receiver validates minimum length and declared extension length, but does not require the datagram length to exactly match the message length. Extra trailing bytes are ignored, except for `STREAM_PAYLOAD`, where all bytes after the header are passed into KCP.
@@ -40,35 +48,51 @@ General rules:
 ### `CONN_CONNECT`
 
 ```text
-0                   1                   4                   5                   7
-+-------------------+-------------------------------+-------------------+-------------------+
-| type = 0x81       | generation_id(u24)            | version           | ext_len(u16)      |
-+-------------------+-------------------------------+-------------------+-------------------+
-| ext bytes ...                                             |
-+-----------------------------------------------------------+
+type=0x81 | destination_id=0(u64) | source_id(u64) | version(u8) | ext_len(u16) | ext bytes
 ```
 
-The initiator calls `kcpmux_conn_connect`, creates a connection, enters `CONNECTING`, and sends `CONN_CONNECT`. `ext` comes from the caller-provided `proto_ext`; values longer than 512 bytes are truncated before being stored.
+`kcpmux_conn_connect()` creates a `CONNECTING` connection and sends its local
+ID as `source_id`, with destination ID zero. The fixed header is 20 bytes;
+caller-provided `proto_ext` is truncated to 512 bytes before storage.
 
 On receive, the acceptor:
 
-1. Checks that `version` equals `KCPMUX_VERSION`.
-2. Looks up an existing connection by peer address and compares its generation.
-3. If the generation matches, treats the packet as a retransmission and resends a successful ACK.
-4. If the generation differs, creates the replacement before closing the old connection with `KCPMUX_CLOSE_REASON_REPLACED`.
-5. Stores the peer extension data and calls `engine->callbacks.conn_connect_notify` when installed. Only `KCPMUX_ACK_RESULT_OK` accepts the connection; a missing callback or any other result rejects and automatically releases it.
+1. Validates IDs, version, and extension length.
+2. Looks up a passive connection by `(peer address, source_id)`.
+3. For an existing CONNECTED connection, resends its original successful ACK
+   without repeating the acceptance callback; other states return `KCPMUX_ERR_STATE`.
+4. For a new source ID, allocates an independent local ID and connection;
+   existing connections at the same address remain active.
+5. Stores the peer ID and extension data and calls
+   `engine->callbacks.conn_connect_notify` when installed. Only
+   `KCPMUX_ACK_RESULT_OK` accepts the connection; a missing callback or any
+   other result rejects and automatically releases it.
 
-Note: if the version does not match and no connection exists for the peer address, the current implementation only returns an error. It does not create a temporary connection to send a version-reject ACK.
+If the version does not match, an existing passive connection with the same
+source ID sends a version-reject ACK. Otherwise the implementation returns an
+error without allocating a temporary connection to send an ACK.
+
+### Connection Lookup
+
+`kcpmux_conn_get_id()` returns the connection's local ID and
+`kcpmux_conn_get_peer_id()` returns its peer ID (zero until the initiator
+receives a successful ACK). Look up a connection with
+`kcpmux_engine_get_conn_by_id(engine, peer_addr, local_id)`; address alone is
+no longer sufficient.
+
+Each `kcpmux_conn_connect()` creates an independent connection regardless of
+existing connections at that address. Local and peer IDs may have the same value.
+
+The optional `random_u64(user_data)` callback supplies connection and stream
+ID starting points; otherwise the library uses `rand()` without calling `srand()`.
+It runs synchronously during engine/connection creation, must not reenter kcpmux,
+and may return any value including zero. Zero-initialize the callback structure
+before assigning fields, and recompile applications for the extended structure.
 
 ### `CONN_CONNECT_ACK`
 
 ```text
-0                   1                   4                   5                   6                   8
-+-------------------+-------------------------------+-------------------+-------------------+-------------------+
-| type = 0x82       | generation_id(u24)            | version           | result            | ext_len(u16)      |
-+-------------------+-------------------------------+-------------------+-------------------+-------------------+
-| ext bytes ...                                                                 |
-+-------------------------------------------------------------------------------+
+type=0x82 | destination_id(u64) | source_id(u64) | version(u8) | result(u8) | ext_len(u16) | ext bytes
 ```
 
 `result` values:
@@ -80,13 +104,20 @@ Note: if the version does not match and no connection exists for the peer addres
 | `KCPMUX_ACK_RESULT_VERSION` | `0x02` | Version mismatch |
 | `KCPMUX_ACK_RESULT_CUSTOM` and above | `0x10..0xff` | Upper-layer custom rejection code |
 
-The initiator accepts this message only while the connection is `CONNECTING`. If `result == OK`, it stores the acceptor's extension data and enters `CONNECTED`; otherwise it enters `ERROR` and closes with `VERSION` or `REJECTED`.
+The ACK destination ID identifies the initiator's connection; its source ID is
+nonzero and identifies the acceptor's connection. The fixed ACK length is 21
+bytes before extension data. The initiator accepts it only while CONNECTING.
+On success, it stores the acceptor's ID and extension data and enters CONNECTED;
+otherwise it enters ERROR and closes with VERSION or REJECTED. Subsequent
+packets in either direction carry the receiving endpoint's ID.
 
-The receiver validates both the connection generation and the protocol version. A version mismatch terminates the connection with `KCPMUX_CLOSE_REASON_VERSION`.
+The receiver validates both the destination ID with its peer address and the protocol version. A version mismatch terminates the connection with `KCPMUX_CLOSE_REASON_VERSION`.
 
 ### Handshake Retransmission
 
-While a connection is `CONNECTING`, its absolute control deadline is registered with the engine timer heap. If no ACK was received and `retry_count < connect_retries`, the due callback retransmits `CONN_CONNECT`; after the retry limit is reached, the connection enters `ERROR` and closes with `TIMEOUT`.
+While `CONNECTING`, the engine retransmits `CONN_CONNECT` every
+`ctrl_timeout_ms`, up to `connect_retries` times. Without an ACK, the connection
+then enters `ERROR` and closes with `TIMEOUT`.
 
 Default values:
 
@@ -100,15 +131,12 @@ Default values:
 ### `CONN_KEEPALIVE`
 
 ```text
-0                   1                   4                   8                   12
-+-------------------+-------------------------------+-------------------+-------------------+
-| type = 0x83       | generation_id(u24)            | time(u32)         | seq(u32)          |
-+-------------------+-------------------------------+-------------------+-------------------+
+type=0x83 | destination_id(u64) | time(u32) | seq(u32)
 ```
 
 After a connection enters `CONNECTED`, it sends `CONN_KEEPALIVE` when the elapsed time since the last keepalive send reaches `keepalive_interval_ms`. `keepalive_seq` is incremented before sending.
 
-The receiver requires the message to be at least 12 bytes and updates `last_recv_ts`. The current implementation does not use `time` or `seq` for RTT, replies, or deduplication.
+The receiver requires the message to be at least 17 bytes and updates `last_recv_ts`. The current implementation does not use `time` or `seq` for RTT, replies, or deduplication.
 
 Default values:
 
@@ -117,8 +145,8 @@ Default values:
 | `keepalive_interval_ms` | `10000ms` |
 | `keepalive_timeout_ms` | `30000ms` |
 
-If a `CONNECTED` connection has not successfully processed a valid packet for
-the current generation within `keepalive_timeout_ms`, it enters `ERROR` and
+If a `CONNECTED` connection has not successfully processed a valid packet
+within `keepalive_timeout_ms`, it enters `ERROR` and
 closes with `TIMEOUT`.
 `ctrl_timeout_ms` must be nonzero. A zero `keepalive_timeout_ms` uses the
 default `30000ms`; a zero keepalive interval still disables keepalive sends.
@@ -126,25 +154,21 @@ default `30000ms`; a zero keepalive interval still disables keepalive sends.
 ### `CONN_CLOSE`
 
 ```text
-+-------------------+-------------------------------+-------------------+
-| type = 0x84       | generation_id(u24)            | reason            |
-+-------------------+-------------------------------+-------------------+
+type=0x84 | destination_id(u64) | reason(u8)
 ```
 
-On receive:
+On receive, update `last_recv_ts`, acknowledge with the same `reason`, and
+close the connection and all its streams.
 
-1. Update `last_recv_ts`.
-2. Send `CONN_CLOSE_ACK` with the same `reason`.
-3. Call `kcpmux_conn_close_internal`, closing the connection and cascading close to all streams.
-
-When `kcpmux_conn_close` is called locally, the connection enters `CLOSING`, records `close_reason = NORMAL`, and sends `CONN_CLOSE`.
+When `kcpmux_conn_close` is called locally, the connection enters `CLOSING`,
+records `close_reason = NORMAL`, and sends `CONN_CLOSE`. If the initiator has
+not received a successful handshake ACK, it completes the local close lifecycle
+without sending a CLOSE packet because the peer ID is unknown.
 
 ### `CONN_CLOSE_ACK`
 
 ```text
-+-------------------+-------------------------------+-------------------+
-| type = 0x85       | generation_id(u24)            | reason            |
-+-------------------+-------------------------------+-------------------+
+type=0x85 | destination_id(u64) | reason(u8)
 ```
 
 This message is accepted only while the connection is `CLOSING`. On receive, the packet `reason` is ignored and the connection closes with the locally recorded `conn->close_reason`.
@@ -180,7 +204,8 @@ advances.
 
 ### No Explicit Stream Open Message
 
-The current protocol has no `STREAM_OPEN` or `STREAM_CREATE` control message. A remote stream is created by the first `STREAM_PAYLOAD`:
+The first `STREAM_PAYLOAD` opens a remote stream; there is no explicit open
+message:
 
 1. Receive an unknown `stream_id` with valid peer parity.
 2. If the connection has no `stream_create_notify`, return `KCPMUX_ERR_NOT_FOUND` and do not create the stream.
@@ -195,12 +220,7 @@ This means the peer does not know about a locally created stream until that stre
 ### `STREAM_PAYLOAD`
 
 ```text
-0                   1
-+-------------------+-------------------------------+-------------------+
-| type = 0xa1       | generation_id(u24)            | stream_id(u32)    |
-+-------------------+-------------------------------+-------------------+
-| kcp_data bytes ...                                |
-+---------------------------------------------------+
+type=0xa1 | destination_id(u64) | stream_id(u32) | kcp_data bytes
 ```
 
 `kcp_data` is the raw segment emitted by KCP. KCP `conv` is set to `stream_id`, so every stream has its own independent KCP instance and reliable transport state.
@@ -214,8 +234,8 @@ Send path:
    gather-copy directly. A custom KCP implementation without `sendv` uses an
    MSS-sized contiguous fallback inside kcp-mux.
 3. KCP emits a contiguous datagram. The KCP output callback supplies the
-   8-byte KCPMUX header and that datagram as two separate fragments:
-   `type(1) + generation_id(3) + stream_id(4)`, then `kcp_data`.
+   13-byte KCPMUX header and that datagram as two separate fragments:
+   `type(1) + destination_connection_id(8) + stream_id(4)`, then `kcp_data`.
 4. The fragments are synchronously consumed by the required `write_socketv`
    callback. A transport may use scatter/gather I/O or copy them directly into
    its final owned send buffer.
@@ -233,21 +253,18 @@ packets may belong to multiple streams. The engine-level operation visits only
 streams with pending work. A nonzero `flush` still updates KCP synchronously and
 clears the accumulated count.
 
-Receive path:
-
-1. The protocol layer parses `stream_id`.
-2. It finds or passively creates the stream.
-3. It strips the 8-byte KCPMUX header and feeds the remaining bytes into that stream's KCP instance.
-4. If KCP changes from unreadable to readable, `stream_read_notify` is triggered.
+On receive, the protocol finds or creates the stream by `stream_id`, strips
+the 13-byte header, and feeds the remaining bytes into KCP. A transition from
+unreadable to readable triggers `stream_read_notify`.
 
 Packet size behavior:
 
 - Generated `STREAM_PAYLOAD` messages cannot exceed 1500 bytes.
-- The KCPMUX header is 8 bytes, so the sender accepts at most 1492 bytes from a
+- The KCPMUX header is 13 bytes, so the sender accepts at most 1487 bytes from a
   KCP output callback. The current receive path does not enforce this total
   datagram limit and passes all bytes after the header to KCP.
 - The default `kcp_mss` is `1200`; KCP's own header overhead is defined as 24 bytes.
-- `kcp_mss` must be `1..1468` and is fixed when the stream is created.
+- `kcp_mss` must be `1..1463` and is fixed when the stream is created.
 - `send_pause_threshold` must be nonzero, and `send_resume_threshold` must not
   exceed it.
 
@@ -256,10 +273,7 @@ Packet size behavior:
 ### `STREAM_CLOSE`
 
 ```text
-0                   1                   4                   8                   9
-+-------------------+-------------------------------+-------------------+-------------------+
-| type = 0x93       | generation_id(u24)            | stream_id(u32)    | reason            |
-+-------------------+-------------------------------+-------------------+-------------------+
+type=0x93 | destination_id(u64) | stream_id(u32) | reason(u8)
 ```
 
 The receiver must find an existing stream, and `stream_id` must not be `0`.
@@ -267,13 +281,11 @@ Normal close follows the receive-drain behavior below; non-normal close sends an
 ACK and closes immediately. If the stream is not found, the receiver returns
 `KCPMUX_ERR_NOT_FOUND`.
 
-When `kcpmux_stream_close` is called locally, the stream enters `CLOSING` and
-rejects new upper-layer sends. During send drain, KCP continues to update,
-retransmit, and process ACKs. `STREAM_CLOSE(NORMAL)` is sent only after KCP
-`waitsnd` reaches zero, so
-all data accepted before close has reached the peer KCP. A locally initiated
-stream that has never sent upper-layer data remains unknown to the peer and
-closes locally without a control packet.
+`kcpmux_stream_close()` enters `CLOSING` and rejects new sends. KCP continues
+updating, retransmitting, and processing ACKs until `waitsnd` reaches zero, then
+sends `STREAM_CLOSE(NORMAL)`: all previously accepted data has reached the peer
+KCP. A locally initiated stream that has never sent data closes locally without
+a control packet.
 
 After `STREAM_CLOSE` is sent, the active closer stops processing KCP payloads
 and only runs the control-message ACK/retry lifecycle. Reverse-direction data
@@ -281,8 +293,8 @@ is outside this one-way close guarantee.
 
 The send drain is bounded by `drain_timeout_ms`. If it expires, the sender makes
 one best-effort `STREAM_CLOSE(TIMEOUT)` send and closes locally with `TIMEOUT`.
-Connection cascades and non-normal stream closes remain forced and do not wait
-for KCP drain.
+Connection close affects only that connection. Non-normal stream closes are
+forced and do not wait for KCP drain.
 
 When an `OPEN` stream receives a normal peer close, it sends `STREAM_CLOSE_ACK`
 immediately and remains `CLOSING` while complete messages are readable. New
@@ -308,10 +320,7 @@ accepted the data; it does not mean the peer application consumed it.
 ### `STREAM_CLOSE_ACK`
 
 ```text
-0                   1                   4                   8                   9
-+-------------------+-------------------------------+-------------------+-------------------+
-| type = 0x94       | generation_id(u24)            | stream_id(u32)    | reason            |
-+-------------------+-------------------------------+-------------------+-------------------+
+type=0x94 | destination_id(u64) | stream_id(u32) | reason(u8)
 ```
 
 This message is accepted only while the stream is waiting for its locally sent
@@ -336,4 +345,3 @@ Stream close retransmission uses the stream `ctrl_timeout_ms` and `close_retries
 | `REJECTED` | `0x03` | Rejected by upper layer |
 | `IDLE` | `0x04` | Idle close |
 | `TIMEOUT` | `0x05` | Timeout close |
-| `REPLACED` | `0x06` | Superseded by a new connection generation |

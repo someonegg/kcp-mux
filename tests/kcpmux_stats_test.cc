@@ -195,7 +195,7 @@ TEST_F(kcpmux_stats_engine, stream_lifecycle) {
         &ctx.client_ctx);
     ctx.deliver_all();
 
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
@@ -383,7 +383,7 @@ TEST_F(kcpmux_stats_engine, api_calls) {
     EXPECT_EQ(kcpmux_conn_get_state(client_conn), KCPMUX_CONN_STATE_CONNECTED);
 
     // Setup server connection callbacks
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     ASSERT_NE(server_conn, nullptr);
@@ -529,7 +529,7 @@ TEST_F(kcpmux_stats_conn, tx_rx_packets) {
         &ctx.client_ctx);
     ctx.deliver_all();
 
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     ASSERT_NE(server_conn, nullptr);
@@ -590,7 +590,7 @@ TEST_F(kcpmux_stats_conn, multiple_streams) {
         &ctx.client_ctx);
     ctx.deliver_all();
 
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
@@ -750,7 +750,7 @@ TEST_F(kcpmux_stats_stream, ttfb) {
         &ctx.client_ctx);
     ctx.deliver_all();
 
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
@@ -817,7 +817,7 @@ TEST_F(kcpmux_stats_stream, write_block) {
         &ctx.client_ctx);
     ctx.deliver_all();
 
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
@@ -890,7 +890,7 @@ TEST_F(kcpmux_stats_stream, read_block) {
         &ctx.client_ctx);
     ctx.deliver_all();
 
-    kcpmux_conn_t *server_conn = kcpmux_engine_get_conn_by_addr(
+    kcpmux_conn_t *server_conn = find_only_conn(
         ctx.server_engine,
         ctx.client_addr.get());
     kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);

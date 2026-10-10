@@ -17,7 +17,8 @@ void kcpmux_stream_config_init(kcpmux_stream_config_t *config);
 // Engine API
 
 // callbacks, set_timer, write_socketv, and monotonic_time_ms are required;
-// conn_connect_notify is optional. A custom kcp_ops must provide every required
+// conn_connect_notify and random_u64 are optional. Zero-initialize the callback
+// structure before assigning callbacks. A custom kcp_ops must provide every required
 // operation; sendv is optional and uses an MSS-sized scalar-send fallback when
 // absent. The operations table is copied during creation. Invalid defaults return NULL.
 //
@@ -52,7 +53,10 @@ void kcpmux_engine_finish_batch(kcpmux_engine_t *engine);
 // Dispatches work due when the replaceable one-shot timer fires.
 void kcpmux_engine_update(kcpmux_engine_t *engine);
 
-kcpmux_conn_t *kcpmux_engine_get_conn_by_addr(kcpmux_engine_t *engine, const kcpmux_addr_t *addr);
+// Finds a connection by peer address and this engine's local connection ID.
+// Returns NULL for an invalid key or an unknown/closed connection.
+kcpmux_conn_t *kcpmux_engine_get_conn_by_id(
+    kcpmux_engine_t *engine, const kcpmux_addr_t *addr, uint64_t local_connection_id);
 
 void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *stats);
 
@@ -66,15 +70,12 @@ void kcpmux_engine_get_stats(kcpmux_engine_t *engine, kcpmux_engine_stats_t *sta
 // to a later loop.
 //
 // Close callbacks may run synchronously from engine_input(), engine_update(),
-// conn/stream close, engine destruction, or conn_connect() replacing a CLOSING
-// connection. After these calls return, previously held conn/stream handles may
-// be invalid; query APIs do not advance object lifecycles.
+// conn/stream close or engine destruction. After these calls return,
+// previously held conn/stream handles may be invalid; query APIs do not advance object lifecycles.
 
-// Creates the initiator connection for an address. Returns NULL while an
-// existing connection is CONNECTING or CONNECTED. An existing CLOSING
-// connection is synchronously closed with KCPMUX_CLOSE_REASON_REPLACED and a
-// distinct non-zero generation is installed; its close callback runs inside
-// this call before the new CONNECT is sent. Invalid configuration returns NULL.
+// Creates an independent initiator connection, even if others use this address.
+// Returns NULL for invalid parameters/configuration, allocation failure, or
+// local connection ID exhaustion. Existing connections are never replaced.
 kcpmux_conn_t *kcpmux_conn_connect(
     kcpmux_engine_t *engine,
     const kcpmux_addr_t *peer_addr,
@@ -94,6 +95,12 @@ void kcpmux_conn_set_callbacks(
     kcpmux_conn_t *conn,
     const kcpmux_conn_callbacks_t *callbacks,
     void *user_data);
+
+// Local ID is nonzero and is not reused during the engine's lifetime.
+// Its random starting point has the high bit cleared; subsequent IDs may set it.
+uint64_t kcpmux_conn_get_id(kcpmux_conn_t *conn);
+// Peer ID is zero until the initiator receives a successful handshake ACK.
+uint64_t kcpmux_conn_get_peer_id(kcpmux_conn_t *conn);
 
 uint8_t kcpmux_conn_get_state(kcpmux_conn_t *conn);
 

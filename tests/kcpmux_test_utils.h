@@ -265,7 +265,9 @@ static inline kcpmux_engine_t *create_test_engine(TestContext *ctx)
     callbacks.monotonic_time_ms = test_monotonic_time_ms;
     callbacks.conn_connect_notify = test_conn_connect_notify;
 
-    return kcpmux_engine_create(nullptr, nullptr, nullptr, &callbacks, ctx, nullptr);
+    kcpmux_engine_t *engine = kcpmux_engine_create(nullptr, nullptr, nullptr, &callbacks, ctx, nullptr);
+    if (engine) engine->next_connection_id = 1; // Deterministic test IDs.
+    return engine;
 }
 
 static inline kcpmux_conn_callbacks_t create_conn_callbacks(TestContext *ctx)
@@ -287,6 +289,25 @@ static inline kcpmux_stream_callbacks_t create_stream_callbacks(TestContext *ctx
     callbacks.stream_close_notify = test_stream_close_notify;
     (void)ctx;  // Reserved for future use
     return callbacks;
+}
+
+// Only for legacy single-connection fixtures. Multi-connection tests must use
+// the explicit public address + local ID lookup.
+static inline kcpmux_conn_t *find_only_conn(kcpmux_engine_t *engine, const kcpmux_addr_t *addr)
+{
+    kcpmux_conn_t *found = nullptr;
+    for (int i = 0; i < engine->conn_map->size; i++) {
+        list_head *node;
+        list_for_each(node, &engine->conn_map->hashtable[i]) {
+            auto *conn = list_entry(node, kcpmux_conn_t, hash_node);
+            if (conn->peer_addr.addrlen == addr->addrlen &&
+                memcmp(conn->peer_addr.addr, addr->addr, addr->addrlen) == 0) {
+                EXPECT_EQ(found, nullptr) << "Single-connection fixture is ambiguous";
+                found = kcpmux_engine_get_conn_by_id(engine, addr, conn->local_connection_id);
+            }
+        }
+    }
+    return found;
 }
 
 // ============================================================================
@@ -412,9 +433,8 @@ protected:
         if (!pair.client) return pair;
 
         ctx.deliver_all();
-        pair.server = kcpmux_engine_get_conn_by_addr(
-            ctx.server_engine,
-            ctx.client_addr.get());
+        pair.server = kcpmux_engine_get_conn_by_id(
+            ctx.server_engine, ctx.client_addr.get(), kcpmux_conn_get_peer_id(pair.client));
         if (!pair.server) return pair;
 
         kcpmux_conn_callbacks_t server_callbacks = create_conn_callbacks(&ctx.server_ctx);
@@ -464,11 +484,9 @@ static inline void write_u16(uint8_t *buf, uint16_t val)
     buf[1] = (uint8_t)(val & 0xff);
 }
 
-static inline void write_u24(uint8_t *buf, uint32_t val)
+static inline void write_u64(uint8_t *buf, uint64_t val)
 {
-    buf[0] = (uint8_t)(val >> 16);
-    buf[1] = (uint8_t)((val >> 8) & 0xff);
-    buf[2] = (uint8_t)(val & 0xff);
+    for (unsigned i = 0; i < 8; ++i) buf[i] = (uint8_t)(val >> (56 - 8 * i));
 }
 
 static inline void write_u32(uint8_t *buf, uint32_t val)
@@ -479,11 +497,11 @@ static inline void write_u32(uint8_t *buf, uint32_t val)
     buf[3] = (uint8_t)(val & 0xff);
 }
 
-static inline uint32_t read_u24(const uint8_t *buf)
+static inline uint64_t read_u64(const uint8_t *buf)
 {
-    return ((uint32_t)buf[0] << 16) |
-           ((uint32_t)buf[1] << 8) |
-           buf[2];
+    uint64_t value = 0;
+    for (unsigned i = 0; i < 8; ++i) value = (value << 8) | buf[i];
+    return value;
 }
 
 static inline uint32_t read_u32(const uint8_t *buf)
@@ -494,111 +512,92 @@ static inline uint32_t read_u32(const uint8_t *buf)
            buf[3];
 }
 
-static inline void write_common(uint8_t *buf, uint8_t type, uint32_t generation_id)
+static inline void write_common(uint8_t *buf, uint8_t type, uint64_t destination_id)
 {
     buf[0] = type;
-    write_u24(buf + 1, generation_id);
+    write_u64(buf + 1, destination_id);
 }
 
-// Build CONN_CONNECT message: common(4) + version(1) + ext_len(2) + ext(N)
 static inline std::vector<uint8_t> build_conn_connect(
-    uint32_t generation_id = 1,
+    uint64_t source_id = 1,
     const uint8_t *ext_data = nullptr,
     uint16_t ext_len = 0)
 {
-    unsigned msg_len = 7 + ext_len;
-    std::vector<uint8_t> buf(msg_len);
-    write_common(buf.data(), KCPMUX_MSG_CONN_CONNECT, generation_id);
-    buf[4] = KCPMUX_VERSION;
-    write_u16(buf.data() + 5, ext_len);
-    if (ext_data && ext_len > 0) {
-        memcpy(buf.data() + 7, ext_data, ext_len);
-    }
+    std::vector<uint8_t> buf(KCPMUX_PROTO_CONNECT_LEN + ext_len);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CONNECT, 0);
+    write_u64(buf.data() + KCPMUX_PROTO_COMMON_LEN, source_id);
+    buf[17] = KCPMUX_VERSION;
+    write_u16(buf.data() + 18, ext_len);
+    if (ext_data && ext_len) memcpy(buf.data() + KCPMUX_PROTO_CONNECT_LEN, ext_data, ext_len);
     return buf;
 }
 
-// Build CONN_CONNECT_ACK: common(4) + version(1) + result(1) + ext_len(2) + ext(N)
 static inline std::vector<uint8_t> build_conn_connect_ack(
-    uint8_t result,
-    uint32_t generation_id,
-    const uint8_t *ext_data = nullptr,
-    uint16_t ext_len = 0)
+    uint8_t result, uint64_t destination_id,
+    const uint8_t *ext_data = nullptr, uint16_t ext_len = 0,
+    uint64_t source_id = 0x1000000000000001ULL)
 {
-    unsigned msg_len = 8 + ext_len;
-    std::vector<uint8_t> buf(msg_len);
-    write_common(buf.data(), KCPMUX_MSG_CONN_CONNECT_ACK, generation_id);
-    buf[4] = KCPMUX_VERSION;
-    buf[5] = result;
-    write_u16(buf.data() + 6, ext_len);
-    if (ext_data && ext_len > 0) {
-        memcpy(buf.data() + 8, ext_data, ext_len);
-    }
+    std::vector<uint8_t> buf(KCPMUX_PROTO_CONNECT_ACK_LEN + ext_len);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CONNECT_ACK, destination_id);
+    write_u64(buf.data() + KCPMUX_PROTO_COMMON_LEN, source_id);
+    buf[17] = KCPMUX_VERSION;
+    buf[18] = result;
+    write_u16(buf.data() + 19, ext_len);
+    if (ext_data && ext_len) memcpy(buf.data() + KCPMUX_PROTO_CONNECT_ACK_LEN, ext_data, ext_len);
     return buf;
 }
 
-// Build CONN_CLOSE message: common(4) + reason(1)
-static inline std::vector<uint8_t> build_conn_close(uint8_t reason, uint32_t generation_id = 1)
+static inline std::vector<uint8_t> build_conn_close(uint8_t reason, uint64_t destination_id = 1)
 {
-    std::vector<uint8_t> buf(5);
-    write_common(buf.data(), KCPMUX_MSG_CONN_CLOSE, generation_id);
-    buf[4] = reason;
+    std::vector<uint8_t> buf(KCPMUX_PROTO_CONN_CLOSE_LEN);
+    write_common(buf.data(), KCPMUX_MSG_CONN_CLOSE, destination_id);
+    buf[KCPMUX_PROTO_COMMON_LEN] = reason;
     return buf;
 }
 
-// Build CONN_CLOSE_ACK message: common(4) + reason(1)
-static inline std::vector<uint8_t> build_conn_close_ack(uint8_t reason, uint32_t generation_id = 1)
+static inline std::vector<uint8_t> build_conn_close_ack(uint8_t reason, uint64_t destination_id = 1)
 {
-    std::vector<uint8_t> buf(5);
-    write_common(buf.data(), KCPMUX_MSG_CONN_CLOSE_ACK, generation_id);
-    buf[4] = reason;
+    auto buf = build_conn_close(reason, destination_id);
+    buf[0] = KCPMUX_MSG_CONN_CLOSE_ACK;
     return buf;
 }
 
-// Build CONN_KEEPALIVE message: common(4) + time(4) + seq(4)
-static inline std::vector<uint8_t>
-build_conn_keepalive(uint32_t time, uint32_t seq, uint32_t generation_id = 1)
+static inline std::vector<uint8_t> build_conn_keepalive(
+    uint32_t time, uint32_t seq, uint64_t destination_id = 1)
 {
-    std::vector<uint8_t> buf(12);
-    write_common(buf.data(), KCPMUX_MSG_CONN_KEEPALIVE, generation_id);
-    write_u32(buf.data() + 4, time);
-    write_u32(buf.data() + 8, seq);
+    std::vector<uint8_t> buf(KCPMUX_PROTO_KEEPALIVE_LEN);
+    write_common(buf.data(), KCPMUX_MSG_CONN_KEEPALIVE, destination_id);
+    write_u32(buf.data() + KCPMUX_PROTO_COMMON_LEN, time);
+    write_u32(buf.data() + KCPMUX_PROTO_COMMON_LEN + 4, seq);
     return buf;
 }
 
-// Build STREAM_CLOSE message: common(4) + stream_id(4) + reason(1)
-static inline std::vector<uint8_t>
-build_stream_close(uint32_t stream_id, uint8_t reason, uint32_t generation_id = 1)
+static inline std::vector<uint8_t> build_stream_close(
+    uint32_t stream_id, uint8_t reason, uint64_t destination_id = 1)
 {
-    std::vector<uint8_t> buf(9);
-    write_common(buf.data(), KCPMUX_MSG_STREAM_CLOSE, generation_id);
-    write_u32(buf.data() + 4, stream_id);
-    buf[8] = reason;
+    std::vector<uint8_t> buf(KCPMUX_PROTO_STREAM_CLOSE_LEN);
+    write_common(buf.data(), KCPMUX_MSG_STREAM_CLOSE, destination_id);
+    write_u32(buf.data() + KCPMUX_PROTO_COMMON_LEN, stream_id);
+    buf[KCPMUX_PROTO_STREAM_HEADER_LEN] = reason;
     return buf;
 }
 
-// Build STREAM_CLOSE_ACK message: common(4) + stream_id(4) + reason(1)
-static inline std::vector<uint8_t>
-build_stream_close_ack(uint32_t stream_id, uint8_t reason, uint32_t generation_id = 1)
+static inline std::vector<uint8_t> build_stream_close_ack(
+    uint32_t stream_id, uint8_t reason, uint64_t destination_id = 1)
 {
-    std::vector<uint8_t> buf(9);
-    write_common(buf.data(), KCPMUX_MSG_STREAM_CLOSE_ACK, generation_id);
-    write_u32(buf.data() + 4, stream_id);
-    buf[8] = reason;
+    auto buf = build_stream_close(stream_id, reason, destination_id);
+    buf[0] = KCPMUX_MSG_STREAM_CLOSE_ACK;
     return buf;
 }
 
 static inline std::vector<uint8_t> build_stream_payload(
-    uint32_t stream_id,
-    const uint8_t *payload,
-    unsigned payload_len,
-    uint32_t generation_id = 1)
+    uint32_t stream_id, const uint8_t *payload, unsigned payload_len,
+    uint64_t destination_id = 1)
 {
-    std::vector<uint8_t> buf(8 + payload_len);
-    write_common(buf.data(), KCPMUX_MSG_STREAM_PAYLOAD, generation_id);
-    write_u32(buf.data() + 4, stream_id);
-    if (payload && payload_len > 0) {
-        memcpy(buf.data() + 8, payload, payload_len);
-    }
+    std::vector<uint8_t> buf(KCPMUX_PROTO_STREAM_HEADER_LEN + payload_len);
+    write_common(buf.data(), KCPMUX_MSG_STREAM_PAYLOAD, destination_id);
+    write_u32(buf.data() + KCPMUX_PROTO_COMMON_LEN, stream_id);
+    if (payload && payload_len) memcpy(buf.data() + KCPMUX_PROTO_STREAM_HEADER_LEN, payload, payload_len);
     return buf;
 }
 

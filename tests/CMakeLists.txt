@@ -14,9 +14,11 @@ FetchContent_MakeAvailable(googletest)
 add_executable(kcpmux_tests
     kcpmux_data_test.cc
     kcpmux_e2e_basic_test.cc
+    kcpmux_e2e_multiconn_test.cc
     kcpmux_e2e_stream_test.cc
     kcpmux_e2e_transfer_test.cc
     kcpmux_e2e_utils.cc
+    kcpmux_multiconn_test.cc
     kcpmux_lifecycle_test.cc
     kcpmux_protocol_test.cc
     kcpmux_stats_test.cc

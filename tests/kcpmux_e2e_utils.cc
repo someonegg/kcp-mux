@@ -105,15 +105,20 @@ int e2e_conn_connect_notify(
     }
     resp_proto_ext->len = response_size;
 
+    if (ep->conn_notify_result != KCPMUX_ACK_RESULT_OK ||
+        response_size > KCPMUX_PROTO_EXT_MAX_LEN) return ep->conn_notify_result;
+
     ep->accepted_conns.push_back(conn);
+    ep->active_conns[kcpmux_conn_get_id(conn)] = conn;
+    // Every accepted connection needs its own stream/lifecycle callbacks.
+    kcpmux_conn_callbacks_t callbacks{};
+    callbacks.conn_state_changed = e2e_conn_state_changed;
+    callbacks.conn_close_notify = e2e_conn_close_notify;
+    callbacks.stream_create_notify = e2e_stream_create_notify;
+    kcpmux_conn_set_callbacks(conn, &callbacks, user_data);
     if (!ep->conn) {
         ep->conn = conn;
-        // Set callbacks for accepted connection
-        kcpmux_conn_callbacks_t callbacks{};
-        callbacks.conn_state_changed = e2e_conn_state_changed;
-        callbacks.conn_close_notify = e2e_conn_close_notify;
-        callbacks.stream_create_notify = e2e_stream_create_notify;
-        kcpmux_conn_set_callbacks(conn, &callbacks, user_data);
+        ep->primary_connection_id = kcpmux_conn_get_id(conn);
 
         // Set peer_addr for server-side connection
         const kcpmux_addr_t *peer = kcpmux_conn_get_peer_addr(conn);
@@ -140,6 +145,8 @@ void e2e_conn_state_changed(
     (void)old_state;
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
     ep->conn_state.store(new_state);
+    std::lock_guard<std::mutex> lock(ep->mutex);
+    ep->connection_states[kcpmux_conn_get_id(conn)] = new_state;
 }
 
 void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
@@ -148,6 +155,8 @@ void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
     ep->conn_state.store(kcpmux_conn_get_state(conn));
     ep->conn_close_reason.store(reason);
     std::lock_guard<std::mutex> lock(ep->mutex);
+    ep->active_conns.erase(kcpmux_conn_get_id(conn));
+    ep->connection_states[kcpmux_conn_get_id(conn)] = kcpmux_conn_get_state(conn);
     if (ep->conn == conn) {
         ep->conn = nullptr;
     }
@@ -159,11 +168,11 @@ void e2e_conn_close_notify(kcpmux_conn_t *conn, int reason, void *user_data)
 int e2e_stream_create_notify(kcpmux_stream_t *stream, void *user_data)
 {
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
-    uint32_t stream_id = kcpmux_stream_id(stream);
+    StreamKey key = stream_key(stream);
 
     std::lock_guard<std::mutex> lock(ep->mutex);
     ep->accepted_streams.push_back(stream);
-    ep->active_streams[stream_id] = stream;
+    ep->active_streams[key] = stream;
     if (!ep->stream) {
         ep->stream = stream;
     }
@@ -193,19 +202,19 @@ void e2e_stream_state_changed(
 void e2e_stream_read_notify(kcpmux_stream_t *stream, void *user_data)
 {
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
-    ep->queue_stream_read(kcpmux_stream_id(stream));
+    ep->queue_stream_read(stream_key(stream));
 }
 
 void e2e_stream_write_notify(kcpmux_stream_t *stream, void *user_data)
 {
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
-    ep->queue_stream_write(kcpmux_stream_id(stream));
+    ep->queue_stream_write(stream_key(stream));
 }
 
 void e2e_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_data)
 {
     E2EEndpoint *ep = static_cast<E2EEndpoint *>(user_data);
-    uint32_t stream_id = kcpmux_stream_id(stream);
+    StreamKey key = stream_key(stream);
     ep->stream_close_reason.store(reason);
     std::lock_guard<std::mutex> lock(ep->mutex);
     if (ep->stream == stream) {
@@ -214,8 +223,8 @@ void e2e_stream_close_notify(kcpmux_stream_t *stream, int reason, void *user_dat
     ep->accepted_streams.erase(
         std::remove(ep->accepted_streams.begin(), ep->accepted_streams.end(), stream),
         ep->accepted_streams.end());
-    ep->active_streams.erase(stream_id);
-    ep->pending_sends.erase(stream_id);
+    ep->active_streams.erase(key);
+    ep->pending_sends.erase(key);
 }
 
 // ============================================================================
@@ -289,6 +298,9 @@ void E2EEndpoint::cleanup()
         udp_socket = -1;
     }
     conn = nullptr;
+    primary_connection_id = 0;
+    active_conns.clear();
+    connection_states.clear();
     stream = nullptr;
     accepted_conns.clear();
     accepted_streams.clear();
@@ -307,12 +319,12 @@ void E2EEndpoint::queue_action(std::function<void()> action)
     wake_worker();
 }
 
-void E2EEndpoint::queue_stream_read(uint32_t stream_id)
+void E2EEndpoint::queue_stream_read(StreamKey key)
 {
     bool should_wake = false;
     {
         std::lock_guard<std::mutex> lock(action_mutex);
-        pending_read_stream_ids.insert(stream_id);
+        pending_read_stream_ids.insert(key);
         if (!read_action_queued) {
             read_action_queued = true;
             pending_actions.push_back([this]() { process_readable_streams(); });
@@ -322,9 +334,9 @@ void E2EEndpoint::queue_stream_read(uint32_t stream_id)
     if (should_wake) wake_worker();
 }
 
-void E2EEndpoint::queue_stream_write(uint32_t stream_id)
+void E2EEndpoint::queue_stream_write(StreamKey key)
 {
-    queue_action([this, stream_id]() { flush_pending_send(stream_id); });
+    queue_action([this, key]() { flush_pending_send(key); });
 }
 
 void E2EEndpoint::wake_worker()
@@ -349,18 +361,18 @@ void E2EEndpoint::process_due_timer(int64_t now)
 
 void E2EEndpoint::process_readable_streams()
 {
-    std::set<uint32_t> stream_ids;
+    std::set<StreamKey> stream_ids;
     {
         std::lock_guard<std::mutex> lock(action_mutex);
         stream_ids.swap(pending_read_stream_ids);
         read_action_queued = false;
     }
 
-    for (uint32_t stream_id : stream_ids) {
+    for (StreamKey key : stream_ids) {
         kcpmux_stream_t *current = nullptr;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            auto it = active_streams.find(stream_id);
+            auto it = active_streams.find(key);
             if (it != active_streams.end()) current = it->second;
         }
         if (!current) continue;
@@ -369,22 +381,22 @@ void E2EEndpoint::process_readable_streams()
         int ret;
         while ((ret = kcpmux_stream_recv(current, buf, sizeof(buf))) > 0) {
             std::lock_guard<std::mutex> lock(mutex);
-            auto &data = received_data[stream_id];
+            auto &data = received_data[key];
             data.insert(data.end(), buf, buf + ret);
             total_bytes_received += ret;
         }
     }
 }
 
-void E2EEndpoint::flush_pending_send(uint32_t stream_id)
+void E2EEndpoint::flush_pending_send(StreamKey key)
 {
     for (;;) {
         kcpmux_stream_t *target = nullptr;
         std::vector<uint8_t> chunk;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            auto pending = pending_sends.find(stream_id);
-            auto active = active_streams.find(stream_id);
+            auto pending = pending_sends.find(key);
+            auto active = active_streams.find(key);
             if (pending == pending_sends.end()) return;
             if (active == active_streams.end()) {
                 pending_sends.erase(pending);
@@ -400,7 +412,7 @@ void E2EEndpoint::flush_pending_send(uint32_t stream_id)
         int ret = kcpmux_stream_send(target, chunk.data(), (unsigned)chunk.size(), 1);
 
         std::lock_guard<std::mutex> lock(mutex);
-        auto pending = pending_sends.find(stream_id);
+        auto pending = pending_sends.find(key);
         if (pending == pending_sends.end()) return;
         if (ret <= 0) {
             if (ret < 0) pending_sends.erase(pending);
@@ -541,7 +553,14 @@ void E2EEndpoint::connect_to_with_ext(
             proto_ext_ptr = &proto_ext;
         }
 
-        conn = kcpmux_conn_connect(engine, &kcpmux_addr, nullptr, proto_ext_ptr, &callbacks, this);
+        kcpmux_conn_t *created = kcpmux_conn_connect(engine, &kcpmux_addr, nullptr, proto_ext_ptr, &callbacks, this);
+        std::lock_guard<std::mutex> lock(mutex);
+        conn = created;
+        if (created) {
+            primary_connection_id = kcpmux_conn_get_id(created);
+            active_conns[primary_connection_id] = created;
+            connection_states[primary_connection_id] = KCPMUX_CONN_STATE_CONNECTING;
+        }
     });
 }
 
@@ -559,11 +578,11 @@ void E2EEndpoint::create_stream()
         kcpmux_stream_t *created = kcpmux_stream_create(conn, nullptr, &callbacks, this);
         if (!created)
             return;
-        uint32_t stream_id = kcpmux_stream_id(created);
+        StreamKey key = stream_key(created);
         {
             std::lock_guard<std::mutex> lock(mutex);
             stream = created;
-            active_streams[stream_id] = created;
+            active_streams[key] = created;
         }
         stream_state.store(KCPMUX_STREAM_STATE_OPEN);
     });
@@ -581,28 +600,38 @@ void E2EEndpoint::send_data(const uint8_t *data, size_t len)
 
 void E2EEndpoint::send_data_with_retry(const uint8_t *data, size_t len)
 {
-    uint32_t stream_id = 0;
+    StreamKey key;
     {
         std::lock_guard<std::mutex> lock(mutex);
         if (!stream) return;
-        stream_id = kcpmux_stream_id(stream);
+        key = stream_key(stream);
     }
-    send_data_on_stream_with_retry(stream_id, data, len);
+    send_data_on_stream_with_retry(key, data, len);
+}
+
+StreamKey E2EEndpoint::primary_stream_key(uint32_t stream_id)
+{
+    std::lock_guard<std::mutex> lock(mutex);
+    return {primary_connection_id, stream_id};
 }
 
 void E2EEndpoint::send_data_on_stream_with_retry(
-    uint32_t stream_id,
-    const uint8_t *data,
-    size_t len)
+    uint32_t stream_id, const uint8_t *data, size_t len)
+{
+    send_data_on_stream_with_retry(primary_stream_key(stream_id), data, len);
+}
+
+void E2EEndpoint::send_data_on_stream_with_retry(
+    StreamKey key, const uint8_t *data, size_t len)
 {
     if (!data || len == 0) return;
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (active_streams.find(stream_id) == active_streams.end()) return;
-        auto &pending = pending_sends[stream_id];
+        if (active_streams.find(key) == active_streams.end()) return;
+        auto &pending = pending_sends[key];
         pending.data.insert(pending.data.end(), data, data + len);
     }
-    queue_action([this, stream_id]() { flush_pending_send(stream_id); });
+    queue_action([this, key]() { flush_pending_send(key); });
 }
 
 bool E2EEndpoint::has_pending_send()
@@ -614,7 +643,8 @@ bool E2EEndpoint::has_pending_send()
 bool E2EEndpoint::has_active_stream(uint32_t stream_id)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    return active_streams.find(stream_id) != active_streams.end();
+    StreamKey key{primary_connection_id, stream_id};
+    return active_streams.find(key) != active_streams.end();
 }
 
 kcpmux_stream_t *E2EEndpoint::get_primary_stream()
@@ -651,15 +681,21 @@ void E2EEndpoint::close_stream()
 void E2EEndpoint::clear_received_data(uint32_t stream_id)
 {
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = received_data.find(stream_id);
+    StreamKey key{primary_connection_id, stream_id};
+    auto it = received_data.find(key);
     if (it == received_data.end()) return;
     it->second.clear();
 }
 
 size_t E2EEndpoint::get_received_data(uint32_t stream_id, uint8_t *buf, size_t max_len)
 {
+    return get_received_data(primary_stream_key(stream_id), buf, max_len);
+}
+
+size_t E2EEndpoint::get_received_data(StreamKey key, uint8_t *buf, size_t max_len)
+{
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = received_data.find(stream_id);
+    auto it = received_data.find(key);
     if (it == received_data.end()) return 0;
     size_t copy_len = std::min(max_len, it->second.size());
     memcpy(buf, it->second.data(), copy_len);
@@ -668,8 +704,13 @@ size_t E2EEndpoint::get_received_data(uint32_t stream_id, uint8_t *buf, size_t m
 
 size_t E2EEndpoint::get_received_data_size(uint32_t stream_id)
 {
+    return get_received_data_size(primary_stream_key(stream_id));
+}
+
+size_t E2EEndpoint::get_received_data_size(StreamKey key)
+{
     std::lock_guard<std::mutex> lock(mutex);
-    auto it = received_data.find(stream_id);
+    auto it = received_data.find(key);
     if (it == received_data.end()) return 0;
     return it->second.size();
 }

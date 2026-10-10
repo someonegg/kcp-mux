@@ -1,11 +1,12 @@
 # kcp-mux
 
 `kcp-mux` is a small C library for multiplexed stream transport over KCP.
-It lets one peer connection carry multiple independent streams, while the
-caller keeps control of the underlying packet I/O, timers, and event loop.
+It supports independent connections and streams over the same UDP four-tuple.
+The caller controls packet I/O, timers, and the event loop.
 
 ## Features
 
+- multiple connections on one UDP four-tuple, including simultaneous initiation
 - connection handshake with optional protocol extension data
 - multiple independent streams over one peer connection
 - stream read/write notifications and close notifications
@@ -74,8 +75,10 @@ See [demo/README.md](demo/README.md) for the full demo usage.
 
 ## Protocol
 
-See [docs/protocol.md](docs/protocol.md) for the current wire format and
-connection/stream state behavior.
+The wire protocol is version 4, incompatible with earlier versions.
+
+See [docs/protocol.md](docs/protocol.md) for wire formats and connection/stream
+lifecycles.
 
 ## Architecture Decision Records
 

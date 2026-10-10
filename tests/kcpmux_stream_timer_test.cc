@@ -364,7 +364,7 @@ TEST_F(kcpmux_stream_timer, sendv_falls_back_to_mss_scratch_for_scalar_kcp) {
 
 TEST_F(kcpmux_stream_timer, passive_stream_accept_processes_first_payload) {
     const uint8_t kcp_payload[] = {0xaa};
-    auto payload = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto payload = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, payload.data(), payload.size(), &context.peer_addr), 0);
@@ -381,7 +381,7 @@ TEST_F(kcpmux_stream_timer, passive_stream_accept_processes_first_payload) {
 TEST_F(kcpmux_stream_timer, passive_stream_reject_skips_payload_and_releases_on_ack) {
     context.stream_create_result = 123;
     const uint8_t kcp_payload[] = {0xaa};
-    auto payload = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto payload = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, payload.data(), payload.size(), &context.peer_addr), 0);
@@ -403,9 +403,9 @@ TEST_F(kcpmux_stream_timer, passive_stream_reject_skips_payload_and_releases_on_
     EXPECT_EQ(stream->callbacks.stream_close_notify, nullptr);
     ASSERT_EQ(context.sent_packets.size(), 1u);
     EXPECT_EQ(context.sent_packets.back()[0], KCPMUX_MSG_STREAM_CLOSE);
-    EXPECT_EQ(context.sent_packets.back()[8], KCPMUX_CLOSE_REASON_REJECTED);
+    EXPECT_EQ(context.sent_packets.back()[KCPMUX_PROTO_STREAM_HEADER_LEN], KCPMUX_CLOSE_REASON_REJECTED);
 
-    auto ack = build_stream_close_ack(2, KCPMUX_CLOSE_REASON_REJECTED, conn->generation_id);
+    auto ack = build_stream_close_ack(2, KCPMUX_CLOSE_REASON_REJECTED, conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, ack.data(), ack.size(), &context.peer_addr), 0);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 2), nullptr);
@@ -421,7 +421,7 @@ TEST_F(kcpmux_stream_timer, passive_stream_reject_retransmits_and_times_out) {
     config.close_retries = 1;
     engine->default_stream_config = config;
     const uint8_t kcp_payload[] = {0xaa};
-    auto payload = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto payload = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, payload.data(), payload.size(), &context.peer_addr), 0);
@@ -431,7 +431,7 @@ TEST_F(kcpmux_stream_timer, passive_stream_reject_retransmits_and_times_out) {
     kcpmux_engine_update(engine);
     ASSERT_EQ(context.sent_packets.size(), 2u);
     EXPECT_EQ(context.sent_packets.back()[0], KCPMUX_MSG_STREAM_CLOSE);
-    EXPECT_EQ(context.sent_packets.back()[8], KCPMUX_CLOSE_REASON_REJECTED);
+    EXPECT_EQ(context.sent_packets.back()[KCPMUX_PROTO_STREAM_HEADER_LEN], KCPMUX_CLOSE_REASON_REJECTED);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 2), nullptr);
     EXPECT_EQ(context.release_calls, 1);
     EXPECT_EQ(context.stream_close_calls, 0);
@@ -526,13 +526,13 @@ TEST_F(kcpmux_stream_timer, peer_close_interrupts_local_send_drain) {
     ASSERT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_LOCAL_DRAIN);
     ASSERT_TRUE(context.sent_packets.empty());
     int update_calls = context.total_update_calls;
-    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, close.data(), close.size(), &context.peer_addr), 0);
     ASSERT_EQ(context.sent_packets.size(), 1u);
     EXPECT_EQ(context.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE_ACK);
-    EXPECT_EQ(context.sent_packets[0][8], KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(context.sent_packets[0][KCPMUX_PROTO_STREAM_HEADER_LEN], KCPMUX_CLOSE_REASON_NORMAL);
     EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_FINALIZE);
     EXPECT_EQ(context.stream_close_calls, 0);
 
@@ -554,13 +554,13 @@ TEST_F(kcpmux_stream_timer, peer_close_while_waiting_for_close_ack_finishes_asyn
     ASSERT_EQ(kcpmux_stream_close(stream), 0);
     ASSERT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_WAIT_ACK);
     ASSERT_EQ(context.sent_packets.size(), 1u);
-    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, close.data(), close.size(), &context.peer_addr), 0);
     ASSERT_EQ(context.sent_packets.size(), 2u);
     EXPECT_EQ(context.sent_packets.back()[0], KCPMUX_MSG_STREAM_CLOSE_ACK);
-    EXPECT_EQ(context.sent_packets.back()[8], KCPMUX_CLOSE_REASON_NORMAL);
+    EXPECT_EQ(context.sent_packets.back()[KCPMUX_PROTO_STREAM_HEADER_LEN], KCPMUX_CLOSE_REASON_NORMAL);
     EXPECT_EQ(stream->close_phase, KCPMUX_STREAM_CLOSE_FINALIZE);
     EXPECT_EQ(context.stream_close_calls, 0);
 
@@ -580,7 +580,7 @@ TEST_F(kcpmux_stream_timer, wait_close_ack_stops_processing_kcp_payloads) {
     int input_calls = context.total_input_calls;
     const uint8_t kcp_payload[] = {0xaa};
     auto payload = build_stream_payload(
-        1, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+        1, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     EXPECT_EQ(kcpmux_engine_input(
                   engine, payload.data(), payload.size(), &context.peer_addr),
@@ -607,7 +607,7 @@ TEST_F(kcpmux_stream_timer, send_drain_timeout_forces_timeout_close) {
 
     ASSERT_EQ(context.sent_packets.size(), 1u);
     EXPECT_EQ(context.sent_packets[0][0], KCPMUX_MSG_STREAM_CLOSE);
-    EXPECT_EQ(context.sent_packets[0][8], KCPMUX_CLOSE_REASON_TIMEOUT);
+    EXPECT_EQ(context.sent_packets[0][KCPMUX_PROTO_STREAM_HEADER_LEN], KCPMUX_CLOSE_REASON_TIMEOUT);
     EXPECT_EQ(context.stream_close_calls, 1);
     EXPECT_EQ(context.stream_close_reason, KCPMUX_CLOSE_REASON_TIMEOUT);
     EXPECT_EQ(kcpmux_conn_get_stream_by_id(conn, 1), nullptr);
@@ -621,7 +621,7 @@ TEST_F(kcpmux_stream_timer, peer_normal_close_drains_reads_then_finishes_async) 
     context.recv_result = 4;
     stream->read_blocked = 0;
     uint64_t read_block_count = stream->stats.read_block_count;
-    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, close.data(), close.size(), &context.peer_addr), 0);
@@ -649,7 +649,7 @@ TEST_F(kcpmux_stream_timer, local_close_abandons_peer_read_drain_async) {
     ASSERT_NE(stream, nullptr);
     set_stream_callbacks(stream, &context);
     context.peek_result = 4;
-    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, close.data(), close.size(), &context.peer_addr), 0);
     size_t packets = context.sent_packets.size();
@@ -673,7 +673,7 @@ TEST_F(kcpmux_stream_timer, peer_read_drain_timeout_is_reported) {
     kcpmux_conn_add_stream(conn, stream);
     set_stream_callbacks(stream, &context);
     context.peek_result = 4;
-    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->generation_id);
+    auto close = build_stream_close(1, KCPMUX_CLOSE_REASON_NORMAL, conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, close.data(), close.size(), &context.peer_addr), 0);
 
@@ -686,8 +686,8 @@ TEST_F(kcpmux_stream_timer, peer_read_drain_timeout_is_reported) {
 
 TEST_F(kcpmux_stream_timer, active_older_peer_stream_continues_after_high_water_advances) {
     const uint8_t kcp_payload[] = {0xaa};
-    auto first = build_stream_payload(100, kcp_payload, sizeof(kcp_payload), conn->generation_id);
-    auto second = build_stream_payload(102, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto first = build_stream_payload(100, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
+    auto second = build_stream_payload(102, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, first.data(), first.size(), &context.peer_addr), 0);
@@ -705,7 +705,7 @@ TEST_F(kcpmux_stream_timer, active_older_peer_stream_continues_after_high_water_
 
 TEST_F(kcpmux_stream_timer, duplicate_backward_and_half_ring_peer_ids_are_old) {
     const uint8_t kcp_payload[] = {0xaa};
-    auto first = build_stream_payload(100, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto first = build_stream_payload(100, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, first.data(), first.size(), &context.peer_addr), 0);
     kcpmux_stream_t *stream = kcpmux_conn_get_stream_by_id(conn, 100);
@@ -714,12 +714,12 @@ TEST_F(kcpmux_stream_timer, duplicate_backward_and_half_ring_peer_ids_are_old) {
     kcpmux_stream_close_internal(stream, KCPMUX_CLOSE_REASON_NORMAL);
     kcpmux_engine_operation_leave(engine);
 
-    auto backward = build_stream_payload(98, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto backward = build_stream_payload(98, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
     auto half_ring = build_stream_payload(
         100U + 0x80000000U,
         kcp_payload,
         sizeof(kcp_payload),
-        conn->generation_id);
+        conn->local_connection_id);
     EXPECT_EQ(kcpmux_engine_input(
                   engine, first.data(), first.size(), &context.peer_addr),
               -KCPMUX_ERR_NOT_FOUND);
@@ -736,8 +736,8 @@ TEST_F(kcpmux_stream_timer, duplicate_backward_and_half_ring_peer_ids_are_old) {
 
 TEST_F(kcpmux_stream_timer, out_of_order_unknown_peer_stream_is_rejected) {
     const uint8_t kcp_payload[] = {0xaa};
-    auto newer = build_stream_payload(102, kcp_payload, sizeof(kcp_payload), conn->generation_id);
-    auto delayed = build_stream_payload(100, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto newer = build_stream_payload(102, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
+    auto delayed = build_stream_payload(100, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, newer.data(), newer.size(), &context.peer_addr), 0);
@@ -754,12 +754,12 @@ TEST_F(kcpmux_stream_timer, peer_stream_serial_wraps_on_both_parities) {
         0xFFFFFFFEU,
         kcp_payload,
         sizeof(kcp_payload),
-        conn->generation_id);
+        conn->local_connection_id);
     auto even_wrapped = build_stream_payload(
         2,
         kcp_payload,
         sizeof(kcp_payload),
-        conn->generation_id);
+        conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, even_last.data(), even_last.size(),
                   &context.peer_addr), 0);
@@ -775,12 +775,12 @@ TEST_F(kcpmux_stream_timer, peer_stream_serial_wraps_on_both_parities) {
         0xFFFFFFFFU,
         kcp_payload,
         sizeof(kcp_payload),
-        acceptor_conn->generation_id);
+        acceptor_conn->local_connection_id);
     auto odd_wrapped = build_stream_payload(
         1,
         kcp_payload,
         sizeof(kcp_payload),
-        acceptor_conn->generation_id);
+        acceptor_conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, odd_last.data(), odd_last.size(),
                   &context.peer_addr), 0);
@@ -793,7 +793,7 @@ TEST_F(kcpmux_stream_timer, peer_stream_serial_wraps_on_both_parities) {
 TEST_F(kcpmux_stream_timer, rejected_and_invalid_first_payloads_consume_peer_id) {
     const uint8_t kcp_payload[] = {0xaa};
     context.stream_create_result = 1;
-    auto rejected = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto rejected = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
     ASSERT_EQ(kcpmux_engine_input(
                   engine, rejected.data(), rejected.size(),
                   &context.peer_addr), 0);
@@ -802,7 +802,7 @@ TEST_F(kcpmux_stream_timer, rejected_and_invalid_first_payloads_consume_peer_id)
 
     context.stream_create_result = 0;
     context.input_result = -7;
-    auto invalid = build_stream_payload(4, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto invalid = build_stream_payload(4, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
     EXPECT_EQ(kcpmux_engine_input(
                   engine, invalid.data(), invalid.size(), &context.peer_addr),
               -KCPMUX_ERR_KCPRET(-7));
@@ -1188,8 +1188,8 @@ TEST_F(kcpmux_stream_timer, engine_finish_batch_handles_non_readable_input_strea
     context.check_deadline_ms = 5000;
     context.peek_result = 0;
     const uint8_t kcp_payload[] = {0xaa};
-    auto first = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->generation_id);
-    auto second = build_stream_payload(4, kcp_payload, sizeof(kcp_payload), conn->generation_id);
+    auto first = build_stream_payload(2, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
+    auto second = build_stream_payload(4, kcp_payload, sizeof(kcp_payload), conn->local_connection_id);
 
     ASSERT_EQ(kcpmux_engine_input(
                   engine, first.data(), first.size(), &context.peer_addr), 0);

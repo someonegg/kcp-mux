@@ -19,6 +19,15 @@
 // Maximum protocol message length (stack buffer size)
 #define KCPMUX_PROTO_MSG_MAX_LEN      1500
 
+// Wire lengths: type(1) + destination_connection_id(8).
+#define KCPMUX_PROTO_COMMON_LEN       9U
+#define KCPMUX_PROTO_CONNECT_LEN      (KCPMUX_PROTO_COMMON_LEN + 11U)
+#define KCPMUX_PROTO_CONNECT_ACK_LEN  (KCPMUX_PROTO_COMMON_LEN + 12U)
+#define KCPMUX_PROTO_KEEPALIVE_LEN    (KCPMUX_PROTO_COMMON_LEN + 8U)
+#define KCPMUX_PROTO_CONN_CLOSE_LEN   (KCPMUX_PROTO_COMMON_LEN + 1U)
+#define KCPMUX_PROTO_STREAM_HEADER_LEN (KCPMUX_PROTO_COMMON_LEN + 4U)
+#define KCPMUX_PROTO_STREAM_CLOSE_LEN (KCPMUX_PROTO_STREAM_HEADER_LEN + 1U)
+
 // ============================================================================
 // Protocol handling functions
 // ============================================================================

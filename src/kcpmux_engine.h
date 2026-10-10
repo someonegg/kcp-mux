@@ -30,7 +30,9 @@ struct kcpmux_engine_s {
     kcpmux_stream_config_t     default_stream_config;    // Default stream config
 
     // Connection management
-    kcpmux_htb_t             *conn_map;        // Connection hash table (key: peer_addr)
+    kcpmux_htb_t             *conn_map;        // Key: peer address + local ID
+    kcpmux_htb_t             *handshake_map;   // Passive connections: address + peer ID
+    uint64_t                  next_connection_id; // Zero means exhausted
     uint32_t                  conn_count;      // Connection count
     kcpmux_engine_stats_t     stats;           // Engine statistics
 
@@ -66,6 +68,9 @@ int kcpmux_stream_config_prepare(
 // Get current time (ms)
 int64_t kcpmux_engine_now(kcpmux_engine_t *engine);
 
+// Host random source, or the default rand()-based source.
+uint64_t kcpmux_engine_random_u64(kcpmux_engine_t *engine);
+
 // Timer node lifecycle and scheduling
 int kcpmux_engine_register_timer_node(
     kcpmux_engine_t *engine,
@@ -99,6 +104,10 @@ int kcpmux_engine_write_socketv(
     const kcpmux_iovec_t *iov,
     unsigned iovcnt,
     const kcpmux_addr_t *addr);
+
+// Find a passive connection for a retransmitted CONNECT.
+kcpmux_conn_t *kcpmux_engine_get_passive_conn(
+    kcpmux_engine_t *engine, const kcpmux_addr_t *addr, uint64_t peer_connection_id);
 
 // Add/remove connection
 void kcpmux_engine_add_conn(kcpmux_engine_t *engine, kcpmux_conn_t *conn);

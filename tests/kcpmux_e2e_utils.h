@@ -34,6 +34,12 @@ extern "C" {
 
 namespace kcpmux_e2e {
 
+using StreamKey = std::pair<uint64_t, uint32_t>;
+inline StreamKey stream_key(kcpmux_stream_t *stream)
+{
+    return {kcpmux_conn_get_id(kcpmux_stream_get_conn(stream)), kcpmux_stream_id(stream)};
+}
+
 // ============================================================================
 // Platform compatibility
 // ============================================================================
@@ -101,16 +107,19 @@ struct E2EEndpoint {
     // Accepted connections/streams (for server)
     std::vector<kcpmux_conn_t *> accepted_conns;
     std::vector<kcpmux_stream_t *> accepted_streams;
-    std::map<uint32_t, kcpmux_stream_t *> active_streams;
+    std::map<StreamKey, kcpmux_stream_t *> active_streams;
 
-    // Received data per stream (stream_id -> data)
-    std::map<uint32_t, std::vector<uint8_t>> received_data;
+    // Stream maps use (local connection ID, stream ID).
+    std::map<StreamKey, std::vector<uint8_t>> received_data;
 
     // Pending send data (for handling write block)
-    std::map<uint32_t, PendingSend> pending_sends;
+    std::map<StreamKey, PendingSend> pending_sends;
 
     // Connection state tracking
     kcpmux_conn_t *conn = nullptr;
+    uint64_t primary_connection_id = 0;
+    std::map<uint64_t, kcpmux_conn_t *> active_conns;
+    std::map<uint64_t, uint8_t> connection_states;
     std::atomic<int> conn_state{0};
     std::atomic<int> conn_close_reason{-1};
 
@@ -144,11 +153,12 @@ struct E2EEndpoint {
     void send_data(const uint8_t *data, size_t len);
     void send_data_with_retry(const uint8_t *data, size_t len); // Handles write block
     void send_data_on_stream_with_retry(uint32_t stream_id, const uint8_t *data, size_t len);
+    void send_data_on_stream_with_retry(StreamKey key, const uint8_t *data, size_t len);
     void close_conn();
     void close_stream();
     void queue_action(std::function<void()> action);
-    void queue_stream_read(uint32_t stream_id);
-    void queue_stream_write(uint32_t stream_id);
+    void queue_stream_read(StreamKey key);
+    void queue_stream_write(StreamKey key);
 
     // Query pending send state
     bool has_pending_send();
@@ -160,6 +170,9 @@ struct E2EEndpoint {
     void clear_received_data(uint32_t stream_id);
     size_t get_received_data(uint32_t stream_id, uint8_t *buf, size_t max_len);
     size_t get_received_data_size(uint32_t stream_id);
+    size_t get_received_data(StreamKey key, uint8_t *buf, size_t max_len);
+    size_t get_received_data_size(StreamKey key);
+    StreamKey primary_stream_key(uint32_t stream_id);
     std::vector<uint8_t> get_conn_proto_ext_received();
 
 private:
@@ -167,12 +180,12 @@ private:
   void wake_worker();
   void process_due_timer(int64_t now);
   void process_readable_streams();
-  void flush_pending_send(uint32_t stream_id);
+  void flush_pending_send(StreamKey key);
 
   // Pending actions
   std::mutex action_mutex;
   std::vector<std::function<void()>> pending_actions;
-  std::set<uint32_t> pending_read_stream_ids;
+  std::set<StreamKey> pending_read_stream_ids;
   bool read_action_queued = false;
   void process_actions();
 };

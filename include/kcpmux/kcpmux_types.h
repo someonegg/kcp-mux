@@ -22,7 +22,7 @@ typedef struct kcpmux_iovec_s {
 // Protocol constants
 // ============================================================================
 
-#define KCPMUX_VERSION                 3       // Protocol version
+#define KCPMUX_VERSION                 4       // Protocol version
 #define KCPMUX_ADDR_MAX_LEN            64      // Max address length
 #define KCPMUX_PROTO_EXT_MAX_LEN       512     // Max extension data length
 
@@ -67,7 +67,6 @@ typedef struct kcpmux_addr_s {
 #define KCPMUX_CLOSE_REASON_REJECTED         0x03    // Rejected by upper layer
 #define KCPMUX_CLOSE_REASON_IDLE             0x04    // Idle Close
 #define KCPMUX_CLOSE_REASON_TIMEOUT          0x05    // Timeout
-#define KCPMUX_CLOSE_REASON_REPLACED         0x06    // Replaced by a new generation
 
 // ============================================================================
 // Connection state
@@ -154,7 +153,7 @@ typedef struct kcpmux_stream_config_s {
     uint32_t drain_timeout_ms;        // Graceful send/read drain timeout; must be nonzero
 
     // KCP parameters
-    uint16_t kcp_mss;                 // KCP payload MSS; 1..1468
+    uint16_t kcp_mss;                 // KCP payload MSS; 1..1463
     uint32_t send_pause_threshold;    // Nonzero; block when waitsnd >= this value
     uint32_t send_resume_threshold;   // Resume below this value; must be <= pause
     uint32_t batch_threshold;         // KCP operations per update; 0/1 disables batching
@@ -275,6 +274,12 @@ typedef struct kcpmux_engine_callbacks_s {
         const kcpmux_proto_ext_t *proto_ext,
         kcpmux_proto_ext_t *resp_proto_ext,
         void *user_data);
+
+    // Optional random source for connection and stream ID starting points.
+    // Called synchronously during engine/connection creation with engine
+    // user_data; must not reenter kcpmux. All uint64_t values, including zero,
+    // are valid. The host supplies randomness quality; NULL falls back to rand().
+    uint64_t (*random_u64)(void *user_data);
 } kcpmux_engine_callbacks_t;
 
 typedef struct kcpmux_conn_callbacks_s {
